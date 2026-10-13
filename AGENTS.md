@@ -31,6 +31,10 @@ scripts/install.sh            End-user install/update from the latest GitHub rel
 scripts/publish-preview.sh    CI: (re)publish pre-release preview-<branch> with key: value notes the app parses
 scripts/preview-tag.sh        Branch name → preview tag
 scripts/make-signing-cert.sh  Owner, once: signing certificate → repo secrets (scripts/ci-import-cert.sh uses them in CI)
+firmware/UPSTREAM             OpenHarness commit the puck firmware is built from
+firmware/patches/*.patch      Puck Bridge firmware (clock face, home button, device menu, sounds); see firmware/README.md
+scripts/build-firmware.sh     CI (Linux + Docker espressif/idf:v5.5): upstream + patches → firmware/out/PuckFirmware.{bin,json}, bundled in the app
+scripts/make-dmg.sh           Drag-to-Applications installer dist/PuckBridge.dmg (dmgbuild; window art in Resources/dmg/)
 tests/check_pet_pack.c        Runs an HPET pack through upstream pet_store.c (compiled from a pinned OpenHarness commit)
 tests/make_test_sheet.py      Draws synthetic petdex sheets for that test (stdlib only)
 CHANGELOG.md                  Keep a Changelog format. Update "Unreleased" with every change.
@@ -100,7 +104,15 @@ Other types the firmware understands but we don't use yet: `turn.activity`, `que
 - **Custom packs (HPET, frame type 0x05):** `pet.offer` → `pet.accept` → raw pack bytes in ≤ 8 KB frames, **never more than 16 KB ahead of the last `pet.progress`** (the USB link drops bytes silently past that) → `pet.done` or `pet.error {crc|version|shape|busy|memory}`. 1 MB max, 4 packs max, held in PSRAM, so they're **lost when the puck restarts**: resend when `hello.petIds` lacks ours. Encoder: `PetPack` in main.swift, a port of OpenHarness `cli/src/cable/pets/{sheet,convert,pack}.ts`; parser: firmware `pet_store.c`.
 - **There is no settings screen on the puck.** OpenHarness removed it; its "controls" list is fixed actions. The puck never changes a setting on its own, so `hello.settings` / `settings.state` are the truth and the Mac only sends changes. The finish beep is **muted by default** on a fresh puck.
 - **The Settings tab** is how settings change from the puck without custom firmware: a puck tab (`settings`, last in the TABS carousel) whose rows are tiles (`puckbridge-settings-*`), with how-to text sent as `summary {restore:true}`. On the Focus face a touch starts voice for the tile on screen, so a quick touch-touch (< 1.2 s of audio, or nothing heard) cycles the value, and a spoken value sets it. `focus` on a tile is ignored; `agent.open` on a tile counts as a tap. **Not yet tested on hardware.**
-- No message sets the puck's clock; an idle clock face needs custom firmware.
+- No message sets the puck's clock on official firmware; the clock face is Puck Bridge firmware.
+
+## Puck Bridge firmware (`firmware/`)
+
+- Official firmware + `firmware/patches/*.patch`, built by the `firmware` CI job (Ubuntu, Docker `espressif/idf:v5.5`, cached by patch hash), bundled as `Contents/Resources/PuckFirmware.{bin,json}`. Version `0.0.88-pb.N` (`version.txt` in the patch). `hello` carries `"pb": 1`.
+- **Install path = the official OTA over the cable:** `fw.offer {version, size, sha256}` → (slot erase, seconds) `fw.accept` → type-0x03 frames ≤ 8 KB, ≤ 16 KB ahead of `fw.progress {written}` → `fw.done` → reboot → `hello` with the new `fw`. `fw.error {message}`; silence = declined (e.g. during voice). The firmware checks SHA-256 and that `esp_app_desc.version` equals the offered version; no signature (no secure boot in the shipped sdkconfig). Rollback is enabled, but the image is marked valid as soon as it boots and opens the cable (app_main.c `fw_mark_valid`), so rollback only covers images that crash before that.
+- **Restore:** Settings → Puck → Firmware → Restore downloads Autonomous's published manifest (`storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json`, key `commander`), verifies size + SHA-256, and sends it the same way. OpenHarness also reinstalls official firmware whenever it connects.
+- **Extensions (only when `hello.pb >= 1`):** `ambient` (pre-formatted clock + weather strings, every minute), `pb.menu` / `pb.menu.open` / `pb.menu.tap` (the device Settings menu: the firmware draws rows, `Bridge.menuTap` changes values), `pb.sound {style: chime|soft|bell|digital, volume, test}` (sent after every welcome). Full spec: `firmware/README.md`.
+- No ESP-IDF in Linux cloud sessions (Espressif's servers are blocked): CI is the compile check. The firmware's own host tests (`test/test_*.py`) do run locally with a sparse esp-idf clone (components/json, components/esp_rom at v5.5) as IDF_PATH.
 
 **Buttons (official firmware ≥0.0.88)**
 - **Large/top** (PWR key on the AXP2101 PMIC): tap toggles the screen. Long press is a **hardware restart in the PMIC and can't be changed**.
@@ -163,6 +175,7 @@ Before tagging a release, on a Mac with the puck and Claude Desktop:
 9. ◎ → Check for updates… on an older build finds and installs the release.
 10. Settings → Puck: moving brightness and toggling the beep change the puck, and the values survive unplug/replug.
 11. Settings → Character: each built-in shows on the puck; importing a petdex sheet uploads it (log: "Custom character stored"), and it comes back after the puck restarts.
+13. Puck Bridge firmware: Settings → Puck → Firmware → Install. The puck restarts on `0.0.88-pb.1`; small-button tap → clock; idle 5 min → clock; clock's Settings → menu rows change values (and the Mac's Settings follow); sounds play with Test; hold the small button while Claude writes → stop. Then Restore → official 0.0.88 comes back.
 12. Settings tab on the puck (hold the face → TABS → Settings): stop on "Puck character", tap the face twice → next character; tap, say "Jolly", tap → Jolly. Same for beep/brightness/calm.
 
 Good next step: add unit tests for the framing/CRC against the shared vectors in openharness `cli/src/cable/vectors/cable_frame.txt` (all 27 currently pass in a Python port).
@@ -171,7 +184,7 @@ Good next step: add unit tests for the framing/CRC against the shared vectors in
 
 1. **Signing certificate in CI** so permissions survive updates: the owner runs `scripts/make-signing-cert.sh` once (README). This is the user's to-do.
 2. **Background-finish alerts:** test whether Claude posts macOS notifications when its window is unfocused. If it does, read Notification Center banners via AX and forward them.
-3. **Custom firmware ("Step 6"):** fork `devices/harness-device/firmware` (ESP-IDF 5.5+, ESP32-S3, 466×466 round AMOLED). Goals:
+3. **Custom firmware ("Step 6") — started:** clock face, home button, device menu and sounds ship as Puck Bridge firmware (see above). Still open: fork `devices/harness-device/firmware` (ESP-IDF 5.5+, ESP32-S3, 466×466 round AMOLED). Goals:
    - Report button gestures to the host instead of hard-coding them: e.g. `{"t":"button","id":"top|bottom","gesture":"tap|double|hold"}`, advertised via a `hello` capability like `buttons:"events-v1"`. Puck Bridge then maps gestures to actions from the menu (screen on/off, stop Claude, start voice, next/prev chat, open Claude). The top long-press stays a hardware restart.
    - An **idle clock + weather face**: the host sends e.g. `{"t":"ambient","time":<epoch>,"tz":"…","tempF":…,"cond":"…"}` every minute. Weather comes from Open-Meteo (free, no key) using a ZIP or coordinates set in the menu.
    - Release firmware through this repo's pipeline. Back up the full 16 MB flash (`esptool read_flash`) before the first flash. Keep OpenHarness's service off, or it will overwrite the firmware. First check secure boot is off (`esptool get_security_info`; the repo docs say Secure Boot v2 isn't enabled yet).

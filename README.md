@@ -11,6 +11,9 @@ Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop**
 - Updates itself from this repo's Releases.
 
 ## Install on a Mac
+Download **PuckBridge.dmg** from the [latest release](https://github.com/mattsinitiere/puckbridge/releases/latest), open it, and drag Puck Bridge onto Applications. The first time, if macOS says it can't check the app, open System Settings → Privacy & Security and click **Open Anyway**.
+
+Or in Terminal:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattsinitiere/puckbridge/main/scripts/install.sh | bash
 ```
@@ -18,6 +21,9 @@ Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge* (◎
 
 ## Update
 ◎ menu → **Check for updates…** (it also checks daily). Or re-run the install line.
+
+## Puck Bridge firmware (clock face, home button, sounds)
+◎ → Settings… → **Puck** → **Firmware** → **Install…** puts Puck Bridge's firmware on the puck over the USB cable (about a minute; keep it plugged in). It adds a clock + weather home screen, a Settings menu on the puck, finish-sound choices, and makes the small button a home button (tap: clock · hold while Claude writes: stop). **Restore…** in the same place puts Autonomous's official firmware back.
 
 ## Try work in progress (Beta Access)
 Every branch pushed to GitHub gets a preview build. ◎ → Settings… → General → turn on **Beta Access**, then **Install…** next to the branch you want. **Back to the Release…** returns to the normal version. Previews can be unfinished.
