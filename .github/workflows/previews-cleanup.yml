@@ -1,0 +1,20 @@
+# A deleted branch takes its preview pre-release (and tag) with it.
+name: Previews cleanup
+
+on: delete
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.ref }}
+        run: |
+          TAG="$(scripts/preview-tag.sh "$BRANCH")"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || echo "No preview for $BRANCH"

@@ -1,26 +1,96 @@
-# Compile check: builds the app on every push and pull request so a broken main.swift is caught
-# before a release tag is pushed. Nothing is published; the zip is kept as a short-lived artifact.
+# Compile check + tests on every push and pull request, so a broken main.swift is caught before a release tag.
+# Every push also publishes that branch's build as a PREVIEW pre-release ("preview-<branch>", replaced on each push),
+# which Puck Bridge lists under Settings → General → Beta Access. Pre-releases never count as the latest release,
+# so the normal updater and scripts/install.sh don't see them.
 name: Build
 
 on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:   # Actions → Build → Run workflow: a fresh build, e.g. right after adding the signing secrets
 
 permissions:
-  contents: read
+  contents: write   # to publish previews
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # The OpenHarness commit whose firmware parser the custom-character packs are checked against.
+  OPENHARNESS_SHA: ce68e2fac27b8523c145f79d9d22f2ad7e589aad
 
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version (a preview is <latest release>.<build number>, e.g. 0.4.0.57)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          BASE="${BASE:-v0.0.0}"
+          echo "VERSION=${BASE#v}.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "PB_CHANNEL=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          echo "PB_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      # Signs with your "Puck Bridge Signing" certificate when the secrets exist, so test builds keep macOS
+      # permissions too. Until then, a throwaway certificate tests the same signing path.
+      - name: Signing certificate
+        env:
+          SIGNING_CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_CERT_P12" ]; then
+            scripts/make-signing-cert.sh --out "$RUNNER_TEMP/throwaway"
+            SIGNING_CERT_P12="$(cat "$RUNNER_TEMP/throwaway/cert.p12.b64")"
+            SIGNING_CERT_PASSWORD="$(cat "$RUNNER_TEMP/throwaway/password")"
+            echo "::notice::No SIGNING_CERT_P12 secret yet, so this build is signed with a throwaway certificate (it still loses permissions). Run scripts/make-signing-cert.sh once on your Mac."
+          fi
+          SIGNING_CERT_P12="$SIGNING_CERT_P12" SIGNING_CERT_PASSWORD="$SIGNING_CERT_PASSWORD" scripts/ci-import-cert.sh
+
       - name: Build
-        run: scripts/build.sh v0.0.0
+        run: scripts/build.sh "$VERSION"
+
+      - name: Signed with a certificate (so macOS can keep permissions), not ad-hoc
+        run: |
+          APP="build/Puck Bridge.app"
+          codesign --verify --deep --strict "$APP"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|Signature"
+          codesign -dvv "$APP" 2>&1 | grep -q "Authority=Puck Bridge Signing"
+          codesign -d -r- "$APP" 2>&1 | grep "designated"
+          codesign -d -r- "$APP" 2>&1 | grep -q 'identifier "dev.sinitiere.puckbridge" and certificate leaf'
+
+      - name: Custom characters pass the puck firmware's own pack parser
+        run: |
+          OH="$RUNNER_TEMP/openharness"
+          git init -q "$OH"
+          git -C "$OH" remote add origin https://github.com/autonomous-ai/openharness.git
+          git -C "$OH" sparse-checkout set devices/harness-device/firmware/main devices/harness-device/firmware/test/vectors
+          git -C "$OH" fetch -q --depth 1 --filter=blob:none origin "$OPENHARNESS_SHA"
+          git -C "$OH" checkout -q FETCH_HEAD
+          FW="$OH/devices/harness-device/firmware"
+          cc -std=c11 -O1 -g -fsanitize=address,undefined -I "$FW/main" -o "$RUNNER_TEMP/check_pet_pack" \
+             tests/check_pet_pack.c "$FW/main/ui/habitat/terminal.c" "$FW/main/ui/habitat/fonts.c" -lm
+          # The checker itself accepts upstream's reference packs.
+          "$RUNNER_TEMP/check_pet_pack" "$FW/test/vectors/pet_min.hpet" "$FW/test/vectors/pet_min_v2.hpet"
+          BIN="build/Puck Bridge.app/Contents/MacOS/PuckBridge"
+          for kind in pixel smooth; do
+            python3 tests/make_test_sheet.py "$kind" "$RUNNER_TEMP/$kind.png"
+            for v in 1 2; do "$BIN" --make-pet "$RUNNER_TEMP/$kind.png" "$RUNNER_TEMP/$kind-v$v.hpet" "$v"; done
+          done
+          "$RUNNER_TEMP/check_pet_pack" "$RUNNER_TEMP"/*.hpet
+
+      - name: Publish as a preview (Puck Bridge → Settings → General → Beta Access)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ secrets.SIGNING_CERT_P12 != '' }}
+        run: scripts/publish-preview.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: PuckBridge-${{ github.sha }}

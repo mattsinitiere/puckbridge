@@ -13,6 +13,8 @@
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>LSUIElement</key><true/>
 	<key>PBUpdateRepo</key><string></string>
+	<key>PBChannel</key><string></string>
+	<key>PBCommit</key><string></string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Puck Bridge turns what you say into the puck into text for Claude, on this Mac.</string>
 </dict>
