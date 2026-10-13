@@ -57,7 +57,7 @@ jobs:
       - name: Verify signature
         run: |
           codesign --verify --deep --strict "build/Puck Bridge.app"
-          if [ -n "${SIGN_IDENTITY:-}" ] && ! codesign -dv "build/Puck Bridge.app" 2>&1 | grep -q "Authority=$SIGN_IDENTITY"; then
+          if [ -n "${SIGN_IDENTITY:-}" ] && ! codesign -dvv "build/Puck Bridge.app" 2>&1 | grep -q "Authority=$SIGN_IDENTITY"; then
             echo "::warning::Signing with '$SIGN_IDENTITY' failed; this build is ad-hoc signed. Check the SIGNING_CERT_* secrets."
           fi
 

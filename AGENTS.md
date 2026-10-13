@@ -113,14 +113,17 @@ Bundle id `com.anthropic.claudefordesktop` (Electron). Set `AXManualAccessibilit
 
 **Known limits, all confirmed by testing**
 - Sidebar status icons do **not** change while a normal chat generates. Idle/Done applies to tasks (Cowork/Dispatch/scheduled).
-- **Background finishes are invisible.** If the user switches away mid-reply, nothing in the UI changes when it completes, and Claude sent no macOS notification while in-app (untested with Claude unfocused, which is worth testing).
+- **Background finishes are invisible.** If the user switches away mid-reply, nothing in the UI changes when it completes, and Claude sent no macOS notification while in-app (untested with Claude unfocused, which is worth testing). The bridge only learns the outcome when the user returns to that chat.
+- **The puck's busy timer can't be set:** `turn.started` has no start-time field; the puck counts from when a tile goes idle → busy. Never send `turn.done` for a chat that may still be running, or the timer restarts at 0.
 - **Claude Code sessions** live under the Code tab and aren't in the Chat sidebar. They're intentionally not listed, since switching tabs behind the user is disruptive.
 - **Project chats** are collapsed under project toggles, so only Recents show.
 
 **Finish detection (`Bridge.checkClaude`)**
-- When `writing` goes false → true: snapshot the chat order, conversation texts, message labels, and composer text (the prompt). Send `turn.started` to the best-guess chat (opened-from-puck, else the top row).
-- When `writing` goes true → false: decide "same chat" if ≥50% of the pre-writing texts or message labels remain, **or** a chat row first appeared within 5 s of writing starting (a new chat from the home screen). If so, `notify(activeChat, replyText)`. The reply is the new texts minus the prompt. Otherwise log a switch and stay silent.
-- **Active chat:** a newly appeared row, else the row that jumped furthest up the list, else the one opened from the puck, else the first row.
+- `writing` (Stop present) only changes after two reads in a row agree; while it's settling nothing is decided (a switch can briefly show half the old chat).
+- **Open chat** = the sidebar chat whose (unique) title appears in the conversation area, i.e. its header (`openChatId`). Unverified against every Claude layout; when it's nil the old heuristics apply.
+- Writing starts → the writing chat is: the open chat, else a row that appeared within 5 s (new chat from the home screen), else the last chat opened from the puck/menu (≤ 10 min ago), else the top row. It goes into `busy` with a snapshot of the conversation texts, message labels and composer text (the prompt); `turn.started` is re-sent every 10 s for every busy chat.
+- Writing stops → if the open chat is still the writing one (or, when unknown, ≥ 50% of the snapshot texts/labels remain, or the row is new) it finished: `turn.done` + `notify` with the new texts minus the prompt. Otherwise the user switched away: the chat **stays busy** (`awaySince`), so the puck's timer keeps counting.
+- Coming back to a busy chat: still writing → it just continues; not writing → it finished meanwhile → `turn.done` + a `summary {silent:true}` (no beep, they're looking at it). Background chats are given up after 20 min.
 - An empty sidebar read is ignored unless it happens 3 times in a row, to prevent puck flicker.
 
 **Do not** use claude.ai's private web API or session cookies. That's unofficial, against the terms, and could get the account flagged. Stick to Accessibility.

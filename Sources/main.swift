@@ -225,6 +225,7 @@ struct ClaudeView {
     var composer: AXUIElement?
     var sendButton: AXUIElement?
     var stopButton: AXUIElement?
+    var stopLabel = ""
 }
 
 final class Claude {
@@ -283,7 +284,7 @@ final class Claude {
             }
             if r0 == "AXButton" {
                 let label = text(e, kAXDescriptionAttribute)
-                if label == "Stop" || label.hasPrefix("Stop ") { v.writing = true; v.stopButton = e }
+                if label == "Stop" || label.hasPrefix("Stop ") { v.writing = true; v.stopButton = e; v.stopLabel = label }
                 if label == "Send" { v.sendButton = e }
                 if label.hasPrefix("Show message actions for ") {
                     v.messageLabels.insert(label)
@@ -911,6 +912,16 @@ enum Tile: String, CaseIterable {
     }
 }
 
+/// A chat Claude is writing in. Kept while the user looks at another chat (Claude Desktop only shows Stop for the chat
+/// on screen), so the puck's busy timer doesn't restart from 0 when they come back.
+struct BusyChat {
+    var since: Date
+    var textsBefore: Set<String>   // the conversation before the prompt, to find the reply later
+    var labels: Set<String>
+    var prompt: String
+    var awaySince: Date?           // nil = on screen
+}
+
 final class PetTransfer {
     let id: String
     let data: [UInt8]
@@ -939,21 +950,20 @@ final class Bridge {
     var axTrusted = AXIsProcessTrusted()
     var released = false   // lent to OpenHarness: don't reopen the port
 
-    // finish detection
-    var orderBeforeWriting: [String] = []
-    var labelsWhileWriting: Set<String> = []
-    var textsBefore: Set<String> = []
-    var promptBefore = ""
+    // writing / finish detection
+    var busy: [String: BusyChat] = [:]   // chats Claude is (or was last seen) writing in, shown busy on the puck
+    var writingChat: String?             // the one writing on screen right now
+    var rawWriting = false, rawStreak = 0
+    var nextBusyRefresh = Date.distantFuture
+    var pendingStop: (id: String, at: Date)?
     var firstSeen: [String: Date] = [:]
     var seenOnce = false
-    var writingStarted = Date.distantPast
-    var spinnerChat: String?
-    var spinnerRefresh = Date.distantFuture
     var emptyReads = 0
     var claudeReadOnce = false
 
     // selection + voice
     var openedFromPuck: String?
+    var openedAt = Date.distantPast
     var lastOpenedId = ""
     var pendingFocus: (id: String, at: Date)?
     var sessionStart = Date()
@@ -1080,7 +1090,7 @@ final class Bridge {
             send(["t": "summary", "agentId": t.id, "name": tileName(t), "engine": eng, "machine": MACHINE_NAME,
                   "recap": t.help, "text": t.help, "restore": true])
         }
-        if let s = spinnerChat { send(["t": "turn.started", "agentId": s, "text": "Writing…"]) }
+        for id in busy.keys { send(["t": "turn.started", "agentId": id, "text": "Writing…"]) }
     }
 
     func toast(_ s: String) { send(["t": "toast", "text": s]) }
@@ -1142,9 +1152,17 @@ final class Bridge {
             if let id = msg["agentId"] as? String, Tile(id: id) == nil { pendingFocus = (id, Date()) }
             else { pendingFocus = nil }
         case "turn.stop":
+            let id = msg["agentId"] as? String
             let v = claude.read()
-            if let stop = v.stopButton { say("Puck → stop Claude"); claude.press(stop) }
-            else { toast("Claude isn't writing") }
+            if let stop = v.stopButton, id == nil || id == writingChat || openChatId(v) == id {
+                say("Puck → stop Claude"); claude.press(stop)
+            } else if let id = id, busy[id] != nil, v.chats.contains(where: { $0.id == id }) {
+                // Writing in a chat that isn't on screen: open it, then press its Stop (see the main loop).
+                openChat(id, why: "stop")
+                pendingStop = (id, Date())
+            } else {
+                toast("Claude isn't writing")
+            }
         case "voice.begin":
             voice = VoiceTurn(upload: msg["uploadId"] as? String ?? "",
                               agentId: msg["agentId"] as? String,
@@ -1204,6 +1222,7 @@ final class Bridge {
         guard let chat = v.chats.first(where: { $0.id == id }) else { say("Asked to open a chat that's no longer in the sidebar"); return }
         say("Open \"\(chat.title)\" (\(why))")
         openedFromPuck = chat.id
+        openedAt = Date()
         lastOpenedId = chat.id
         claude.open(chat, bringForward: Pref.bringForward || why == "menu")
     }
@@ -1406,7 +1425,7 @@ final class Bridge {
             target = c
             if id != lastOpened {
                 claude.open(c, bringForward: true)
-                perform { $0.lastOpenedId = id; $0.openedFromPuck = id }
+                perform { $0.lastOpenedId = id; $0.openedFromPuck = id; $0.openedAt = Date() }
                 Thread.sleep(forTimeInterval: 1.0)
             }
         }
@@ -1451,18 +1470,49 @@ final class Bridge {
     }
 
     // ---------- Claude watching ----------
+    /// The chat on screen: the one whose title shows in the conversation area (its header). nil = can't tell.
+    func openChatId(_ v: ClaudeView) -> String? {
+        var titles: [String: String] = [:]   // title -> id, only titles no other chat shares
+        var dup = Set<String>()
+        for c in v.chats {
+            let t = c.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if titles[t] != nil { dup.insert(t) } else { titles[t] = c.id }
+        }
+        for t in v.mainTexts where !dup.contains(t) { if let id = titles[t] { return id } }
+        return nil
+    }
+
+    func startBusy(_ id: String, prev: ClaudeView, now: Date) {
+        if var b = busy[id] {
+            if b.awaySince != nil { say("Back on a chat Claude is still writing in") }
+            b.awaySince = nil
+            busy[id] = b
+        } else {
+            busy[id] = BusyChat(since: now, textsBefore: Set(prev.mainTexts), labels: prev.messageLabels,
+                                prompt: prev.composerText.trimmingCharacters(in: .whitespacesAndNewlines), awaySince: nil)
+        }
+        send(["t": "turn.started", "agentId": id, "text": "Writing…"])
+        nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
+    }
+
+    func endBusy(_ id: String) {
+        busy[id] = nil
+        send(["t": "turn.done", "agentId": id])
+        if writingChat == id { writingChat = nil }
+    }
+
     func checkClaude() {
         guard claude.attach() else {
-            if !view.chats.isEmpty || spinnerChat != nil {
+            if !view.chats.isEmpty || !busy.isEmpty {
                 say("Claude Desktop isn't running")
-                if let s = spinnerChat { send(["t": "turn.done", "agentId": s]) }
-                spinnerChat = nil; spinnerRefresh = .distantFuture
+                for id in busy.keys { send(["t": "turn.done", "agentId": id]) }
+                busy = [:]; writingChat = nil
                 view = ClaudeView(); pushChats(); publish()
             }
             return
         }
         let prev = view
-        let cur = claude.read()
+        var cur = claude.read()
         let first = !claudeReadOnce
         claudeReadOnce = true
 
@@ -1471,65 +1521,94 @@ final class Bridge {
             if emptyReads < 3 { return }
         } else { emptyReads = 0 }
 
+        // Stop has to be there (or gone) on two reads in a row: buttons labelled Stop can flash up while you switch chats.
+        // While it's settling (mid-switch), decide nothing: the screen may still be half the old chat.
+        rawStreak = cur.writing == rawWriting ? rawStreak + 1 : 1
+        rawWriting = cur.writing
+        let settled = rawStreak >= 2
+        if !settled { cur.writing = prev.writing }
+
         let now = Date()
         for c in cur.chats where firstSeen[c.id] == nil { firstSeen[c.id] = seenOnce ? now : .distantPast }
         seenOnce = true
+        let open = openChatId(cur)
+        func title(_ id: String) -> String { cur.chats.first { $0.id == id }?.title ?? "a chat" }
 
-        if !prev.writing && cur.writing {
-            writingStarted = now
-            orderBeforeWriting = prev.chats.map { $0.id }
-            textsBefore = Set(prev.mainTexts)
-            labelsWhileWriting = prev.messageLabels
-            promptBefore = prev.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let guess = openedFromPuck ?? cur.chats.first?.id
-            spinnerChat = guess
-            spinnerRefresh = now.addingTimeInterval(10)
-            if let g = guess { send(["t": "turn.started", "agentId": g, "text": "Writing…"]) }
-            say("Claude is writing…")
-        }
-        if cur.writing { labelsWhileWriting.formUnion(cur.messageLabels) }
-
-        if prev.writing && !cur.writing {
-            let kept = textsBefore.intersection(cur.mainTexts).count
-            let byText = textsBefore.isEmpty ? !cur.mainTexts.isEmpty
-                                             : Double(kept) / Double(textsBefore.count) >= 0.5
-            let keptLabels = labelsWhileWriting.intersection(cur.messageLabels).count
-            let byLabels = !labelsWhileWriting.isEmpty && Double(keptLabels) / Double(labelsWhileWriting.count) >= 0.5
-            let newChat = cur.chats.contains { (firstSeen[$0.id] ?? .distantPast) > writingStarted.addingTimeInterval(-5) }
-            let chat = activeChat(in: cur)
-            if let s = spinnerChat { send(["t": "turn.done", "agentId": s]) }
-            if let c = chat, c.id != spinnerChat { send(["t": "turn.done", "agentId": c.id]) }
-            spinnerChat = nil; spinnerRefresh = .distantFuture
-            if byText || byLabels || newChat {
-                notify(chat, replyText(cur))
+        if settled && cur.writing {
+            // Which chat is writing: the one on screen, else a chat that just appeared (new chat from the home
+            // screen), else the one last opened from the puck or menu, else the top row.
+            var id = open
+            let since = writingChat.flatMap { busy[$0]?.since } ?? now
+            if id == nil, let fresh = cur.chats.first(where: { (firstSeen[$0.id] ?? .distantPast) > since.addingTimeInterval(-5) }) { id = fresh.id }
+            if id == nil { id = writingChat }
+            if id == nil, let o = openedFromPuck, now.timeIntervalSince(openedAt) < 600, cur.chats.contains(where: { $0.id == o }) { id = o }
+            if id == nil { id = cur.chats.first?.id }
+            if let id = id, id != writingChat {
+                if let old = writingChat {
+                    if prev.writing && open == nil, (firstSeen[id] ?? .distantPast) > (busy[old]?.since ?? now).addingTimeInterval(-5) {
+                        // The guess was wrong: it's a brand-new chat. Move the busy state over.
+                        let b = busy[old]; endBusy(old); busy[id] = b
+                    } else {
+                        busy[old]?.awaySince = now   // switched from one writing chat to another
+                    }
+                }
+                startBusy(id, prev: prev, now: now)
+                writingChat = id
+                say("Claude is writing in \"\(title(id))\" (button \"\(cur.stopLabel)\")")
+            }
+            if let w = writingChat { busy[w]?.labels.formUnion(cur.messageLabels) }
+        } else if settled && prev.writing, let id = writingChat {
+            // Stop went away: finished here, or the user switched to another chat.
+            writingChat = nil
+            let b = busy[id]
+            var stayed: Bool
+            if let o = open {
+                stayed = o == id
+            } else if let b = b {
+                let kept = b.textsBefore.intersection(cur.mainTexts).count
+                let byText = b.textsBefore.isEmpty ? !cur.mainTexts.isEmpty : Double(kept) / Double(b.textsBefore.count) >= 0.5
+                let keptLabels = b.labels.intersection(cur.messageLabels).count
+                let byLabels = !b.labels.isEmpty && Double(keptLabels) / Double(b.labels.count) >= 0.5
+                let newChat = (firstSeen[id] ?? .distantPast) > b.since.addingTimeInterval(-5)
+                stayed = byText || byLabels || newChat
             } else {
-                say("Switched chats while Claude was writing (no alert)")
+                stayed = true
+            }
+            if stayed {
+                endBusy(id)
+                notify(cur.chats.first { $0.id == id }, replyText(cur, b))
+            } else {
+                busy[id]?.awaySince = now
+                say("Switched away from \"\(title(id))\" while Claude was writing; it stays busy on the puck")
             }
         }
+
+        // Back on a chat that was busy while you were away, and Claude isn't writing: it finished meanwhile.
+        if settled, !cur.writing, let o = open, let b = busy[o], b.awaySince != nil {
+            endBusy(o)
+            // You're looking at it, so no beep: just put the reply on its tile.
+            let text = Pref.showReply ? replyText(cur, b) : "Claude finished replying."
+            send(["t": "summary", "agentId": o, "name": title(o), "engine": engine, "machine": MACHINE_NAME,
+                  "recap": String(text.prefix(190)), "text": String(text.prefix(1500)), "silent": true])
+            say("\"\(title(o))\" finished while you were away")
+        }
+        // Rows that left the sidebar can't be busy any more.
+        for id in busy.keys where !cur.chats.contains(where: { $0.id == id }) && !cur.chats.isEmpty { endBusy(id) }
+
         let changed = first || cur.chats.map({ $0.id + $0.title }) != view.chats.map({ $0.id + $0.title }) || cur.writing != view.writing
         view = cur
         if greeted { pushChats() }
         if changed { publish() }
     }
 
-    func replyText(_ v: ClaudeView) -> String {
-        let prompt = promptBefore
+    func replyText(_ v: ClaudeView, _ b: BusyChat?) -> String {
+        guard let b = b else { return v.lastReply }
+        let prompt = b.prompt
         let fresh = v.mainTexts.filter { t in
-            !textsBefore.contains(t) && !(prompt.count > 3 && (prompt.contains(t) || t.contains(prompt)))
+            !b.textsBefore.contains(t) && !(prompt.count > 3 && (prompt.contains(t) || t.contains(prompt)))
         }
         let joined = fresh.joined(separator: " ")
         return joined.isEmpty ? v.lastReply : joined
-    }
-
-    func activeChat(in v: ClaudeView) -> Chat? {
-        if let fresh = v.chats.first(where: { (firstSeen[$0.id] ?? .distantPast) > writingStarted.addingTimeInterval(-5) }) { return fresh }
-        var best: (Chat, Int)?
-        for (i, c) in v.chats.enumerated() {
-            if let j = orderBeforeWriting.firstIndex(of: c.id), j - i > (best?.1 ?? 0) { best = (c, j - i) }
-        }
-        if let b = best { return b.0 }
-        if let id = openedFromPuck, let c = v.chats.first(where: { $0.id == id }) { return c }
-        return v.chats.first
     }
 
     // ---------- actions from the menu / Settings window (run via perform) ----------
@@ -1587,9 +1666,20 @@ final class Bridge {
             if greeted && now >= nextPing { send(["t": "ping"]); nextPing = now.addingTimeInterval(10) }
             // The puck forgets a tile is busy 25 s after the last turn.started (ui_prune_stale_busy): keep it fresh so
             // the character keeps working and the small button can still stop Claude.
-            if greeted, let s = spinnerChat, now >= spinnerRefresh {
-                send(["t": "turn.started", "agentId": s, "text": "Writing…"])
-                spinnerRefresh = now.addingTimeInterval(10)
+            if now >= nextBusyRefresh {
+                // A chat left in the background can't be watched (Claude Desktop shows nothing for it): stop calling
+                // it busy after a while. Coming back to it settles it either way.
+                for (id, b) in busy where (b.awaySince.map { now.timeIntervalSince($0) > 20 * 60 } ?? false) {
+                    say("Gave up waiting on a chat in the background (20 min)")
+                    endBusy(id)
+                }
+                if greeted { for id in busy.keys { send(["t": "turn.started", "agentId": id, "text": "Writing…"]) } }
+                nextBusyRefresh = busy.isEmpty ? .distantFuture : now.addingTimeInterval(10)
+            }
+            if let p = pendingStop, now.timeIntervalSince(p.at) > 1.5 {
+                pendingStop = nil
+                let v = claude.read()
+                if let stop = v.stopButton { say("Puck → stop Claude"); claude.press(stop) } else { toast("Claude isn't writing") }
             }
             if let x = petXfer, now.timeIntervalSince(x.last) > 10 {
                 send(["t": "pet.drop", "id": x.id])

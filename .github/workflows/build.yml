@@ -46,8 +46,8 @@ jobs:
         run: |
           APP="build/Puck Bridge.app"
           codesign --verify --deep --strict "$APP"
-          codesign -dv "$APP" 2>&1 | grep -E "Identifier|Authority|Signature"
-          codesign -dv "$APP" 2>&1 | grep -q "Authority=Puck Bridge Signing"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|Signature"
+          codesign -dvv "$APP" 2>&1 | grep -q "Authority=Puck Bridge Signing"
           codesign -d -r- "$APP" 2>&1 | grep "designated"
           codesign -d -r- "$APP" 2>&1 | grep -q 'identifier "dev.sinitiere.puckbridge" and certificate leaf'
 

@@ -22,6 +22,10 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - Test builds from the Build workflow are signed too: with your certificate once it's set up, otherwise with a throwaway one that tests the signing path. Both workflows share `scripts/ci-import-cert.sh`.
 - Transcripts are no longer written to the log (only their word count).
 ### Fixed
+- The puck's "working for Xs" timer restarted at 0 every time you switched chats and came back. A chat Claude is writing in now stays busy on the puck while you look at another one. When you return, the timer has kept counting; if it finished meanwhile, its tile gets the reply without a beep. (The puck can't be told an earlier start time, so a task already running before Puck Bridge saw it counts from when it was first seen.)
+- Clicking between chats could show "writing" on the puck when nothing was sent. The busy chat was guessed from the last one opened on the puck; it's now the chat on screen (found by its title in the conversation header), and the Stop button must be seen on two reads in a row. The log names the chat and button that triggered it.
+- The small button's Stop now stops the chat it was pressed for, opening it first if needed, instead of whatever chat is on screen.
+- The Build workflow's signature check always failed, and the Release workflow's signature warning always fired, because `codesign -dv` doesn't print Authority lines (`-dvv` does).
 - `scripts/*.sh` weren't executable in git, so the Release workflow failed at the build step ("Permission denied").
 - Restoring OpenHarness didn't hand the puck over: Puck Bridge reopened the port within a fraction of a second.
 - On replies longer than 25 seconds the puck stopped showing Claude as busy, so the character stopped working and the small button could no longer stop Claude. `turn.started` is now refreshed every 10 s.

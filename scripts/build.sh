@@ -33,7 +33,7 @@ if ! codesign --force --timestamp=none --sign "$IDENTITY" --identifier dev.sinit
   echo "  (signing with '$IDENTITY' failed — falling back to ad-hoc)"
   codesign --force --sign - --identifier dev.sinitiere.puckbridge "$APP"
 fi
-codesign -dv "$APP" 2>&1 | grep -E "Identifier|Authority|Signature" || true
+codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|Signature" || true
 
 ditto -c -k --keepParent "$APP" dist/PuckBridge.zip
 echo "✓ $APP"
