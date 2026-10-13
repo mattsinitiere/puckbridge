@@ -1,9 +1,35 @@
 # Changelog
 
-## v0.3.0
-- First repository release.
-- Menu-bar app: puck auto-connect, recent Claude chats on the puck, open on select, finish alerts with reply preview.
-- Voice: on-device transcription → typed into the selected chat (send automatically or paste only).
-- Small button stops Claude while it's writing.
-- Takes the puck from OpenHarness automatically; "Restore OpenHarness service" menu item.
-- Start at login; in-app updates from GitHub Releases (checks daily, or ◎ → Check for updates…).
+All notable changes to Puck Bridge are documented here.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: [SemVer](https://semver.org/).
+The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
+
+## [Unreleased]
+### Added
+- `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
+
+## [0.3.0] - 2026-10-13
+First release from this repository.
+### Added
+- GitHub Actions release workflow: tag `v*` → universal (arm64 + x86_64) build → `PuckBridge.zip` attached to the release.
+- In-app updates from GitHub Releases: daily check plus ◎ → **Check for updates…**; installs in place and relaunches.
+- `scripts/install.sh` one-line installer/updater for any Mac; `scripts/dev-install.sh` for local builds.
+- Optional stable code signing in CI (`SIGNING_CERT_P12` / `SIGNING_CERT_PASSWORD` secrets) so macOS keeps permissions across updates.
+- Version shown in the ◎ menu.
+- MIT license with attribution for the OpenHarness-derived puck protocol.
+
+## [0.2.0] - 2026-10-13 (local build, not released)
+### Added
+- Menu-bar app (◎) with puck and Claude status, settings, log, and Start at login.
+- Voice: puck audio → on-device Apple Speech → pasted into the selected chat and sent (or paste-only).
+- Small puck button stops Claude while it's writing (`turn.started` marks the tile busy; `turn.stop` presses Claude's Stop).
+- Automatically stops OpenHarness's `harnessd` service when it holds the puck; "Restore OpenHarness service" menu item.
+
+## [0.1.0] - 2026-10-13 (prototype scripts)
+### Added
+- `puck_test.py`: proved the puck can be driven without OpenHarness (framing verified against upstream vectors, 27/27).
+- `claude_ax_dump.swift` / `claude_watch.swift`: mapped what Claude Desktop exposes to Accessibility.
+- `puck_bridge.swift`: recent chats on the puck, open on select/tap, finish alerts with reply preview, flicker protection.
+### Findings
+- Claude Desktop doesn't expose background chat completion; finish alerts cover the open chat only.
+- Puck needs `CLOCAL` on the serial port; OpenHarness's launchd agent (KeepAlive) must be booted out to free the port.
