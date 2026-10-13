@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Puck Bridge app icon ("Minimal ◎"). Source for Resources/AppIcon.png; build.sh turns the PNG into AppIcon.icns. -->
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1efeb"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <circle cx="512" cy="512" r="300" fill="none" stroke="#1d1d1f" stroke-width="52"/>
+  <circle cx="512" cy="512" r="170" fill="none" stroke="#e8743b" stroke-width="52"/>
+  <circle cx="512" cy="512" r="58" fill="#1d1d1f"/>
+</svg>
