@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+### Added
+- **Claude Code sessions, as Claude's sidebar shows them:** Puck Bridge now reads Claude's Code view (the Mode switch at the top of its sidebar) and lists each project's sessions on the puck, one tab per project (Chats first). Both lists are remembered while Claude shows the other one, and Code sessions also across restarts (titles only).
+- **Open and talk to Code sessions from the puck:** pausing on a session, tapping it or speaking to it switches Claude to its Code list, opens the session and types there. Same for a chat while Claude shows Code sessions. The menu-bar menu gets **Open Code Session**.
+- **Setup window:** on first launch (or a new Mac), one permission at a time: Accessibility, Speech Recognition, Location. Each step moves on by itself when macOS reports the grant. For Accessibility a small card floats beside System Settings with an icon you can drag into the list. Menu → Finish Setting Up… and Settings → General → Walk Me Through It… bring it back.
+- Code sessions whose sidebar status says they are working show as busy on the puck and beep when they finish, even in the background (unverified: which status words Claude uses; every new one is logged once).
+### Changed
+- Code sessions no longer come from `~/.claude/projects` (that missed Cloud sessions and mixed Code sessions into the chat list when Claude showed its Code view). The "Claude Code" all-sessions tab is gone; each project has its own tab.
+- The open conversation is now found from its own title (Claude's web view is titled "<title> - Claude Code"), before the older text heuristics.
+- Speech and Location are no longer asked for the moment the app starts; the Setup window asks for them in turn.
 
 ## [0.7.0] - 2026-10-13
 ### Added
