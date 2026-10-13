@@ -60,7 +60,12 @@ jobs:
           SIGNING_CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         # Older tags don't have the script; they build ad-hoc.
-        run: if [ -f scripts/ci-import-cert.sh ]; then bash scripts/ci-import-cert.sh; else echo "::warning::This tag predates scripts/ci-import-cert.sh: ad-hoc signed."; fi
+        run: |
+          if [ -f scripts/ci-import-cert.sh ]; then
+            bash scripts/ci-import-cert.sh
+          else
+            echo "::warning::This tag predates scripts/ci-import-cert.sh, so it is ad-hoc signed."
+          fi
 
       - name: Build
         run: bash scripts/build.sh "$TAG"   # bash: older tags have the script without its executable bit
