@@ -70,7 +70,7 @@ jobs:
           echo "SIGN_IDENTITY=Puck Bridge Signing" >> "$GITHUB_ENV"
 
       - name: Build
-        run: scripts/build.sh "$TAG"
+        run: bash scripts/build.sh "$TAG"   # bash: older tags have the script without its executable bit
 
       - name: Verify signature
         run: |
