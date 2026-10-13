@@ -82,6 +82,9 @@ jobs:
       - name: Attach PuckBridge.zip to the release
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+            # Notes: this version's section of CHANGELOG.md (shown in the app's update dialog), else GitHub's own.
+            awk -v v="${TAG#v}" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+            if [ -s "$RUNNER_TEMP/notes.md" ]; then NOTES=(--notes-file "$RUNNER_TEMP/notes.md"); else NOTES=(--generate-notes); fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" "${NOTES[@]}" --verify-tag
           fi
           gh release upload "$TAG" dist/PuckBridge.zip --repo "$GITHUB_REPOSITORY" --clobber
