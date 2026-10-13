@@ -30,11 +30,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: macos-latest
+  # The puck firmware the app bundles (Settings → Puck → Firmware). Built on Linux: it needs Docker.
+  firmware:
+    runs-on: ubuntu-latest
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
     steps:
       - name: Check tag
         id: tag
@@ -54,6 +57,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.tag.outputs.ref }}
+      - name: Build the puck firmware
+        run: if [ -f scripts/build-firmware.sh ]; then bash scripts/build-firmware.sh; else mkdir -p firmware/out; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: puck-firmware
+          path: firmware/out
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build:
+    needs: firmware
+    runs-on: macos-latest
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.firmware.outputs.ref }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # a tag without firmware patches builds no firmware
+        with:
+          name: puck-firmware
+          path: firmware/out
 
       - name: Import signing certificate (optional)
         env:
@@ -69,6 +96,13 @@ jobs:
 
       - name: Build
         run: bash scripts/build.sh "$TAG"   # bash: older tags have the script without its executable bit
+
+      - name: Installer (drag to Applications)
+        run: |
+          if [ -f scripts/make-dmg.sh ]; then
+            python3 -m pip install --quiet --break-system-packages "dmgbuild>=1.6,<2" || python3 -m pip install --quiet "dmgbuild>=1.6,<2"
+            PATH="$(python3 -m site --user-base)/bin:$PATH" bash scripts/make-dmg.sh
+          fi
 
       - name: Verify signature
         run: |
@@ -87,3 +121,4 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" "${NOTES[@]}" --target "$(git rev-parse HEAD)"
           fi
           gh release upload "$TAG" dist/PuckBridge.zip --repo "$GITHUB_REPOSITORY" --clobber
+          if [ -f dist/PuckBridge.dmg ]; then gh release upload "$TAG" dist/PuckBridge.dmg --repo "$GITHUB_REPOSITORY" --clobber; fi

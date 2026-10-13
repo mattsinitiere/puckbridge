@@ -20,7 +20,7 @@ APP="build/Puck Bridge.app"
 echo "→ Building Puck Bridge $VERSION (updates from: ${REPO:-none})"
 rm -rf build dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
 
-FRAMEWORKS=(-framework Cocoa -framework SwiftUI -framework Speech -framework AVFoundation -framework ServiceManagement -framework ImageIO -framework UniformTypeIdentifiers)
+FRAMEWORKS=(-framework Cocoa -framework SwiftUI -framework CoreLocation -framework CryptoKit -framework Speech -framework AVFoundation -framework ServiceManagement -framework ImageIO -framework UniformTypeIdentifiers)
 swiftc -O -target arm64-apple-macos14  -o build/PuckBridge-arm64  Sources/main.swift "${FRAMEWORKS[@]}"
 swiftc -O -target x86_64-apple-macos14 -o build/PuckBridge-x86_64 Sources/main.swift "${FRAMEWORKS[@]}"
 lipo -create build/PuckBridge-arm64 build/PuckBridge-x86_64 -output "$APP/Contents/MacOS/PuckBridge"
@@ -34,6 +34,12 @@ for s in 16 32 128 256 512; do
   sips -z $((s * 2)) $((s * 2)) Resources/AppIcon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+
+# Puck firmware built by scripts/build-firmware.sh (CI), installed over the cable from Settings → Puck → Firmware.
+if [ -f firmware/out/PuckFirmware.bin ] && [ -f firmware/out/PuckFirmware.json ]; then
+  cp firmware/out/PuckFirmware.bin firmware/out/PuckFirmware.json "$APP/Contents/Resources/"
+  echo "  bundled puck firmware $(sed -E 's/.*"version":"([^"]*)".*/\1/' firmware/out/PuckFirmware.json)"
+fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PBUpdateRepo $REPO" "$APP/Contents/Info.plist"

@@ -6,6 +6,24 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-13
+### Added
+- `firmware/patches/0001-puck-bridge-clock-and-home.patch` (firmware `0.0.88-pb.1`) and `firmware/README.md` (what it changes, the `ambient` / `pb.menu` / `pb.sound` protocol, how to restore). Passes all 33 upstream firmware host contracts.
+- **Puck Bridge firmware** for the round puck: the official firmware plus `firmware/patches` (built in CI from a pinned OpenHarness commit with ESP-IDF 5.5, bundled in the app). Settings → Puck → Firmware installs it over the USB cable; **Restore…** downloads Autonomous's official firmware, checks it, and puts it back. The puck keeps its previous firmware as a fallback.
+- **Clock + weather face** (needs Puck Bridge firmware): shows after 5 minutes idle (Settings → Puck → Clock face: Never/2/5/10/15/30 min, 24-hour clock, weather on/off). Weather comes from Open-Meteo using this Mac's location (Location Services; only a rounded location is sent).
+- **Small button = home** (needs Puck Bridge firmware): tap → clock face; hold while Claude writes → stop; hold otherwise → screen off/on.
+- Location row in Settings → General → Permissions.
+- **Installer:** releases now include `PuckBridge.dmg`. Open it and drag Puck Bridge onto the Applications folder (the window shows the app, an arrow and Applications). `PuckBridge.zip` stays for the in-app updater.
+- **Character library:** Settings → Character → **Import Characters…** takes petdex sprite sheets, folders with a pet.json, and .zip files of them (zips inside zips too), so a whole bundle imports at once. They stay on this Mac (never in the app or the repo); pick one and the puck gets it over the cable. Remove with the trash button. The old single "your own" character moves into the library.
+- **On-device Settings menu** (Puck Bridge firmware): the clock face's Settings button opens Character, Sound, Volume, Brightness, Calm mode, Clock after, 24-hour clock and Weather; tap a row to change it. The Mac app does the changing, so both stay in sync.
+- **Finish sounds** (Puck Bridge firmware): Chime, Soft, Bell or Digital, plus volume, in Settings → Puck → Sound (with Test) and in the puck's menu.
+- Settings → Advanced → **Copy Claude Layout**: Claude's window structure (no message text), for fixing chat detection.
+### Fixed
+- Chats and Claude Code sessions got mixed: on Claude's Code tab the sidebar lists Code sessions, which were read as chats. Puck Bridge now recognises them (by their titles in `~/.claude/projects`) and keeps the chat list.
+- **Fo showed nothing:** the official firmware (0.0.88) has no Fo. Fo is now offered only on Puck Bridge firmware, which has it.
+### Changed
+- With Puck Bridge firmware the puck's own Settings menu replaces the Settings tab of tiles.
+
 ## [0.6.0] - 2026-10-13
 ### Added
 - **Settings window** (◎ → Settings…, ⌘,) with General, Character, Puck, Claude & Voice and Advanced tabs. It shows live status and a permissions checklist, and opens by itself on first launch if Accessibility isn't allowed yet.

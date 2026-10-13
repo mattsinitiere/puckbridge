@@ -22,6 +22,8 @@ import ServiceManagement
 import Security
 import ImageIO
 import UniformTypeIdentifiers
+import CoreLocation
+import CryptoKit
 
 // ============================================================================================
 // MARK: Settings + log
@@ -43,6 +45,16 @@ enum Pref {
     static var character: String { get { d.string(forKey: "character") ?? "claude" } set { d.set(newValue, forKey: "character") } }
     static var betaAccess: Bool { get { bool("betaAccess", false) } set { d.set(newValue, forKey: "betaAccess") } }
     static var customName: String? { get { d.string(forKey: "customName") } set { d.set(newValue, forKey: "customName") } }
+    // Clock face (Puck Bridge firmware only)
+    static var idleMin: Int { get { d.object(forKey: "idleMin") as? Int ?? 5 } set { d.set(newValue, forKey: "idleMin") } }
+    static var clock24: Bool {
+        get { d.object(forKey: "clock24") as? Bool ?? !(DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "h").contains("a") }
+        set { d.set(newValue, forKey: "clock24") }
+    }
+    static var weatherOn: Bool { get { bool("weatherOn", true) } set { d.set(newValue, forKey: "weatherOn") } }
+    /// Finish sound on Puck Bridge firmware (one of SOUND_STYLES) and its volume.
+    static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
+    static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -95,7 +107,7 @@ func signingIdentity() -> String? {
 // MARK: Puck framing   A5 48 | ver | type | len16 | payload | crc16   (little-endian)
 // ============================================================================================
 let FRAME_VER: UInt8 = 1
-let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_PET: UInt8 = 0x05
+let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_PET: UInt8 = 0x05
 let MAX_PAYLOAD = 8192
 
 func crc16(_ bytes: ArraySlice<UInt8>) -> UInt16 {
@@ -315,6 +327,31 @@ final class Claude {
     }
 
     func press(_ e: AXUIElement) { _ = AXUIElementPerformAction(e, kAXPressAction as CFString) }
+
+    /// Claude's window structure for support: roles, button labels and ids, never the conversation text.
+    func layoutDump() -> String {
+        guard let app = app else { return "Claude Desktop isn't running." }
+        var lines: [String] = [], n = 0
+        func walk(_ e: AXUIElement, _ d: Int) {
+            n += 1
+            if n > 6000 || d > 45 { return }
+            let r = role(e)
+            var desc = text(e, kAXDescriptionAttribute)
+            if desc.hasPrefix("Show message actions") { desc = "Show message actions…" }
+            let title = r == "AXStaticText" ? "" : text(e, kAXTitleAttribute)
+            let dom = text(e, "AXDOMIdentifier")
+            let selected = (attr(e, kAXSelectedAttribute) as? Bool) == true
+            var line = String(repeating: " ", count: d) + r
+            if !desc.isEmpty { line += " desc=\"\(desc.prefix(60))\"" }
+            if !title.isEmpty { line += " title=\"\(title.prefix(60))\"" }
+            if selected { line += " selected" }
+            if !dom.isEmpty { line += " id=\(dom)" }
+            lines.append(line)
+            for k in children(e) { walk(k, d + 1) }
+        }
+        walk(app, 0)
+        return lines.joined(separator: "\n")
+    }
 }
 
 // ============================================================================================
@@ -455,11 +492,134 @@ let BUILTIN_CHARACTERS: [PuckCharacter] = [
     PuckCharacter(id: "fo", name: "Fo", blurb: "A little pink ghost who runs errands.", symbol: "moon.stars",
                   aliases: ["fo", "foe", "faux", "pho", "ghost", "four"]),
 ]
-let CUSTOM_ID = "custom"
+/// Finish sounds Puck Bridge firmware can play (firmware/README.md).
+let SOUND_STYLES: [(id: String, name: String)] = [("chime", "Chime"), ("soft", "Soft"), ("bell", "Bell"), ("digital", "Digital")]
+func soundName(_ id: String) -> String { SOUND_STYLES.first { $0.id == id }?.name ?? "Chime" }
+
+let CUSTOM_ID = "custom"   // the old single "your own" slot; migrated into the library
+let LIB_PREFIX = "lib:"
+let libraryDir = supportDir.appendingPathComponent("Characters")
+func isLibrary(_ id: String) -> Bool { id.hasPrefix(LIB_PREFIX) }
 
 func characterName(_ id: String) -> String {
-    if id == CUSTOM_ID { return Pref.customName ?? "Your character" }
+    if let c = CharacterLibrary.shared.find(id) { return c.name }
     return BUILTIN_CHARACTERS.first { $0.id == id }?.name ?? "Clawd"
+}
+
+/// An imported character: libraryDir/<slug>/ holds its sprite sheet and character.json {name, sheet}.
+struct LibraryCharacter: Identifiable, Equatable { let id: String; let name: String; let sheet: URL; let dir: URL }
+
+/// The characters you've imported. They live on this Mac only (never in the app or the repo); the puck gets the
+/// chosen one as a pack over the cable.
+final class CharacterLibrary {
+    static let shared = CharacterLibrary()
+    private let lock = NSLock()
+    private var items: [LibraryCharacter] = []
+
+    var all: [LibraryCharacter] { lock.lock(); defer { lock.unlock() }; return items }
+    func find(_ id: String) -> LibraryCharacter? { all.first { $0.id == id } }
+
+    func reload() {
+        var out: [LibraryCharacter] = []
+        for dir in (try? FileManager.default.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil)) ?? [] {
+            guard let d = try? Data(contentsOf: dir.appendingPathComponent("character.json")),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let name = j["name"] as? String, let sheet = j["sheet"] as? String else { continue }
+            out.append(LibraryCharacter(id: LIB_PREFIX + dir.lastPathComponent, name: name, sheet: dir.appendingPathComponent(sheet), dir: dir))
+        }
+        out.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        lock.lock(); items = out; lock.unlock()
+    }
+
+    /// Names arrive with invisible characters sometimes (petdex's "Pikachu‌" has a zero-width joiner).
+    static func clean(_ name: String) -> String {
+        let kept = name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0.properties.generalCategory != .format }
+        return String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines).prefix(22).description
+    }
+
+    /// Imports sprite sheets, petdex folders (pet.json + spritesheet), and .zip files of either, zips inside zips
+    /// included. Each one is converted once to check it fits the puck. Background thread.
+    func importItems(_ urls: [URL]) -> (added: [LibraryCharacter], errors: [String]) {
+        var found: [(name: String, data: Data, ext: String)] = []
+        var errors: [String] = []
+        let fm = FileManager.default
+        func scan(_ url: URL, _ depth: Int) {
+            guard depth < 5, !url.lastPathComponent.hasPrefix("."), url.lastPathComponent != "__MACOSX" else { return }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+            if isDir.boolValue {
+                if let d = try? Data(contentsOf: url.appendingPathComponent("pet.json")),
+                   let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                   let path = j["spritesheetPath"] as? String, let sheet = try? Data(contentsOf: url.appendingPathComponent(path)) {
+                    let name = (j["displayName"] as? String) ?? (j["id"] as? String) ?? url.lastPathComponent
+                    found.append((CharacterLibrary.clean(name), sheet, (path as NSString).pathExtension))
+                    return
+                }
+                for child in (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [] { scan(child, depth + 1) }
+            } else if url.pathExtension.lowercased() == "zip" {
+                let tmp = fm.temporaryDirectory.appendingPathComponent("puckbridge-import-\(UUID().uuidString)")
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                p.arguments = ["-x", "-k", url.path, tmp.path]
+                do { try p.run(); p.waitUntilExit() } catch { errors.append("\(url.lastPathComponent): couldn't unzip it"); return }
+                scan(tmp, depth + 1)
+                try? fm.removeItem(at: tmp)
+            } else if ["png", "webp", "gif", "jpg", "jpeg"].contains(url.pathExtension.lowercased()), depth == 0 || url.deletingPathExtension().lastPathComponent != "preview",
+                      let d = try? Data(contentsOf: url) {
+                let base = url.deletingPathExtension().lastPathComponent
+                let name = base == "spritesheet" ? url.deletingLastPathComponent().lastPathComponent : base
+                found.append((CharacterLibrary.clean(name.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized), d, url.pathExtension))
+            }
+        }
+        for u in urls { scan(u, 0) }
+
+        var added: [LibraryCharacter] = []
+        let existing = Set(all.compactMap { try? Data(contentsOf: $0.sheet) }.map { FirmwareImage.sha([UInt8]($0)) })
+        for f in found {
+            if existing.contains(FirmwareImage.sha([UInt8](f.data))) { continue }   // already in the library
+            do {
+                _ = try CustomCharacter.make(data: f.data, name: f.name)
+                var slug = f.name.lowercased().map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
+                if slug.isEmpty { slug = "character" }
+                var dir = libraryDir.appendingPathComponent(slug), n = 2
+                while fm.fileExists(atPath: dir.path) { dir = libraryDir.appendingPathComponent("\(slug)-\(n)"); n += 1 }
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                let sheetName = "spritesheet." + (f.ext.isEmpty ? "png" : f.ext.lowercased())
+                try f.data.write(to: dir.appendingPathComponent(sheetName))
+                let meta = try JSONSerialization.data(withJSONObject: ["name": f.name, "sheet": sheetName])
+                try meta.write(to: dir.appendingPathComponent("character.json"))
+                added.append(LibraryCharacter(id: LIB_PREFIX + dir.lastPathComponent, name: f.name, sheet: dir.appendingPathComponent(sheetName), dir: dir))
+            } catch {
+                errors.append("\(f.name): \(error.localizedDescription)")
+            }
+        }
+        if found.isEmpty && errors.isEmpty { errors.append("No sprite sheets found in what you chose.") }
+        reload()
+        return (added, errors)
+    }
+
+    func remove(_ id: String) {
+        if let c = find(id) { try? FileManager.default.removeItem(at: c.dir) }
+        reload()
+    }
+
+    /// The old single custom character (≤ v0.6) becomes a library entry.
+    func migrate() {
+        guard let name = Pref.customName, let data = try? Data(contentsOf: customSheetURL) else { return }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
+        try? data.write(to: tmp)
+        let added = importItems([tmp]).added
+        try? FileManager.default.removeItem(at: tmp)
+        if let c = added.first, Pref.character == CUSTOM_ID { Pref.character = c.id }
+        if !added.isEmpty || find(Pref.character) != nil { try? FileManager.default.removeItem(at: customSheetURL); Pref.customName = nil }
+    }
+
+    /// The first frame of a sheet, for the Settings window.
+    static func preview(_ url: URL) -> NSImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let cw = img.width / 8, ch = img.height / 9
+        return img.cropping(to: CGRect(x: 0, y: 0, width: cw, height: ch)).map { NSImage(cgImage: $0, size: NSSize(width: cw, height: ch)) }
+    }
 }
 
 /// Petdex sprite sheet (8 x 9 cells) -> the puck firmware's HPET pack. A port of OpenHarness
@@ -851,6 +1011,7 @@ final class CustomCharacter {
     let name: String
     let pet: PetPack.Pet
     let preview: NSImage?
+    var libId = ""
     private var packs: [Int: [UInt8]] = [:]
     private let lock = NSLock()
 
@@ -901,6 +1062,174 @@ final class CustomCharacter {
         packs[version] = p
         return p
     }
+}
+
+// ============================================================================================
+// MARK: Weather (for the puck's clock face)
+// ============================================================================================
+// The Mac's location (Location Services) → Open-Meteo (free, no key). Only the rounded latitude/longitude leave
+// the Mac, and only to api.open-meteo.com. Refreshed every 30 minutes.
+struct WeatherNow { let temp: String; let cond: String; let hilo: String; let at: Date }
+
+final class WeatherService: NSObject, CLLocationManagerDelegate {
+    private let lm = CLLocationManager()
+    private var location: CLLocation?
+    private var current: WeatherNow?
+    private let lock = NSLock()
+    var onChange: (() -> Void)?
+    private(set) var note = ""
+
+    var status: CLAuthorizationStatus { lm.authorizationStatus }
+    var allowed: Bool { status == .authorizedAlways || status == .authorized }
+
+    /// What the clock face shows; nil when off, unknown or more than 3 hours old.
+    func snapshot() -> WeatherNow? {
+        lock.lock(); defer { lock.unlock() }
+        guard Pref.weatherOn, let c = current, Date().timeIntervalSince(c.at) < 3 * 3600 else { return nil }
+        return c
+    }
+
+    func start() {
+        lm.delegate = self
+        lm.desiredAccuracy = kCLLocationAccuracyKilometer
+        refresh()
+        Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+
+    /// Main thread. Asks for permission the first time.
+    func refresh() {
+        guard Pref.weatherOn else { setNote(""); return }
+        switch status {
+        case .notDetermined: lm.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorized: lm.requestLocation()
+        default: setNote("Location is off for Puck Bridge, so the clock shows no weather.")
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if allowed { manager.requestLocation() }
+        onChange?()
+    }
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let l = locations.last else { return }
+        location = l
+        fetch(l)
+    }
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        say("Weather: couldn't get the Mac's location (\(error.localizedDescription))")
+        if let l = location { fetch(l) }   // the last known place is fine for weather
+    }
+
+    private func setNote(_ n: String) { note = n; onChange?() }
+
+    private func fetch(_ l: CLLocation) {
+        let f = Locale.current.measurementSystem == .us
+        let lat = String(format: "%.2f", l.coordinate.latitude), lon = String(format: "%.2f", l.coordinate.longitude)
+        let q = "latitude=\(lat)&longitude=\(lon)&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min"
+            + "&timezone=auto&forecast_days=1" + (f ? "&temperature_unit=fahrenheit" : "")
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?" + q) else { return }
+        URLSession.shared.dataTask(with: url) { data, _, err in
+            guard let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cur = j["current"] as? [String: Any], let t = (cur["temperature_2m"] as? NSNumber)?.doubleValue else {
+                say("Weather: couldn't load (\(err?.localizedDescription ?? "bad response"))")
+                DispatchQueue.main.async { self.setNote("Couldn't load the weather just now.") }
+                return
+            }
+            let code = (cur["weather_code"] as? NSNumber)?.intValue ?? -1
+            let daily = j["daily"] as? [String: Any]
+            let hi = ((daily?["temperature_2m_max"] as? [NSNumber])?.first)?.doubleValue
+            let lo = ((daily?["temperature_2m_min"] as? [NSNumber])?.first)?.doubleValue
+            func deg(_ v: Double) -> String { "\(Int(v.rounded()))°" }
+            let w = WeatherNow(temp: deg(t), cond: WeatherService.describe(code),
+                               hilo: hi != nil && lo != nil ? "H \(deg(hi!))  L \(deg(lo!))" : "", at: Date())
+            self.lock.lock(); self.current = w; self.lock.unlock()
+            DispatchQueue.main.async { self.setNote("") }
+        }.resume()
+    }
+
+    /// WMO weather interpretation codes (Open-Meteo).
+    static func describe(_ c: Int) -> String {
+        switch c {
+        case 0: return "Clear"
+        case 1: return "Mostly clear"
+        case 2: return "Partly cloudy"
+        case 3: return "Cloudy"
+        case 45, 48: return "Fog"
+        case 51, 53, 55: return "Drizzle"
+        case 56, 57: return "Freezing drizzle"
+        case 61: return "Light rain"
+        case 63: return "Rain"
+        case 65: return "Heavy rain"
+        case 66, 67: return "Freezing rain"
+        case 71: return "Light snow"
+        case 73: return "Snow"
+        case 75: return "Heavy snow"
+        case 77: return "Snow grains"
+        case 80, 81: return "Showers"
+        case 82: return "Heavy showers"
+        case 85, 86: return "Snow showers"
+        case 95: return "Thunderstorm"
+        case 96, 99: return "Storm with hail"
+        default: return ""
+        }
+    }
+}
+
+// ============================================================================================
+// MARK: Puck firmware (installed over the cable)
+// ============================================================================================
+// Puck Bridge's own firmware (the official firmware + firmware/patches: clock face, home button) is built by CI
+// and bundled in the app. The official firmware can always be put back: Autonomous publishes it openly.
+struct FirmwareImage {
+    let version: String
+    let data: [UInt8]
+    let sha256: String
+    let label: String
+
+    static func sha(_ d: [UInt8]) -> String { SHA256.hash(data: Data(d)).map { String(format: "%02x", $0) }.joined() }
+
+    /// The firmware bundled in this build of the app, if any (checked against its own manifest).
+    static let bundled: FirmwareImage? = {
+        guard let j = Bundle.main.url(forResource: "PuckFirmware", withExtension: "json"),
+              let b = Bundle.main.url(forResource: "PuckFirmware", withExtension: "bin"),
+              let meta = (try? JSONSerialization.jsonObject(with: Data(contentsOf: j))) as? [String: Any],
+              let version = meta["version"] as? String, let sum = meta["sha256"] as? String,
+              let bytes = try? Data(contentsOf: b) else { return nil }
+        let data = [UInt8](bytes)
+        guard sha(data) == sum.lowercased() else { say("Bundled puck firmware failed its checksum; ignoring it"); return nil }
+        return FirmwareImage(version: version, data: data, sha256: sum.lowercased(), label: "Puck Bridge firmware \(version)")
+    }()
+
+    static let officialManifest = URL(string: "https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json")!
+
+    /// Downloads the official round-puck firmware Autonomous publishes, verifying size and SHA-256.
+    static func official(_ done: @escaping (Result<FirmwareImage, Error>) -> Void) {
+        URLSession.shared.dataTask(with: officialManifest) { data, _, err in
+            guard let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let c = j["commander"] as? [String: Any], let version = c["version"] as? String,
+                  let urlS = c["url"] as? String, let url = URL(string: urlS), let sum = c["sha256"] as? String,
+                  let size = (c["size"] as? NSNumber)?.intValue else {
+                done(.failure(SimpleError("Couldn't read Autonomous's firmware list (\(err?.localizedDescription ?? "bad response")).")))
+                return
+            }
+            URLSession.shared.dataTask(with: url) { bin, _, err in
+                guard let bin = bin else { done(.failure(SimpleError(err?.localizedDescription ?? "Download failed"))); return }
+                let bytes = [UInt8](bin)
+                guard bytes.count == size, sha(bytes) == sum.lowercased() else {
+                    done(.failure(SimpleError("The official firmware download didn't match its checksum."))); return
+                }
+                done(.success(FirmwareImage(version: version, data: bytes, sha256: sum.lowercased(), label: "official firmware \(version)")))
+            }.resume()
+        }.resume()
+    }
+}
+
+final class FwTransfer {
+    let image: FirmwareImage
+    var offset = 0, acked = 0
+    var accepted = false
+    var last = Date()
+    init(_ image: FirmwareImage) { self.image = image }
 }
 
 // ============================================================================================
@@ -975,6 +1304,10 @@ struct Snapshot {
     var petsSupported = false
     var petNote = ""
     var character = Pref.character
+    var pbFirmware = 0          // the puck runs Puck Bridge firmware (hello "pb")
+    var isPro = false
+    var fwNote = ""
+    var fwBusy = false
 }
 
 /// Settings tiles: the rows of the puck's Settings tab, so settings can be changed on the puck itself.
@@ -1071,6 +1404,16 @@ final class Bridge {
     var petMapSent = ""
     var petNote = ""
 
+    // firmware + clock face
+    var pbFirmware = 0
+    var board = ""
+    var fwXfer: FwTransfer?
+    var fwNote = ""
+    var fwExpect = ""          // version we installed, confirmed by the next hello
+    var nextAmbient = Date.distantPast
+    var weather: WeatherService?
+    var inCodeTab = false
+
     var onSnapshot: ((Snapshot) -> Void)?
 
     // ---------- work from other threads runs here, on the bridge thread ----------
@@ -1100,6 +1443,10 @@ final class Bridge {
         s.settingsNote = settingsNote
         s.petsSupported = petMax >= 1
         s.petNote = petNote
+        s.pbFirmware = s.puckConnected ? pbFirmware : 0
+        s.isPro = board == "pro"
+        s.fwNote = fwNote
+        s.fwBusy = fwXfer != nil
         s.character = Pref.character
         DispatchQueue.main.async { self.onSnapshot?(s) }
     }
@@ -1118,6 +1465,8 @@ final class Bridge {
         if port != nil { say("Puck disconnected (\(why))") }
         port = nil; greeted = false; pushedKey = ""; pushedTabsKey = ""; voice = nil; decoder.reset()
         petXfer = nil; petMapSent = ""; puckSettings = nil; settingsNote = ""
+        if fwXfer != nil { fwXfer = nil; fwNote = "The puck disconnected during the install. It keeps its current firmware; try again." }
+        pbFirmware = 0
     }
     func dropPuck(_ why: String) { sendLock.lock(); dropPuckLocked(why); sendLock.unlock(); publish() }
 
@@ -1163,7 +1512,7 @@ final class Bridge {
     func buildTabs() -> [PuckTab] {
         let chats = view.chats.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
-        let settings = Pref.puckTiles ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
+        let settings = Pref.puckTiles && pbFirmware < 1 ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
         guard Pref.codeTabs, !code.isEmpty else { return out + settings }
         func row(_ s: CodeSession) -> PuckItem { PuckItem(id: CODE_PREFIX + s.id, name: s.title, code: s) }
         out.append(PuckTab(id: "code", name: "Claude Code", items: code.prefix(MAX_ROWS).map(row)))
@@ -1251,6 +1600,13 @@ final class Bridge {
                   "features": ["agents.refresh", "settings"]])
             fw = msg["fw"] as? String ?? "?"
             hw = msg["hw"] as? String ?? ""
+            board = msg["board"] as? String ?? ""
+            pbFirmware = msg["pb"] as? Int ?? 0
+            if !fwExpect.isEmpty && !greeted {
+                fwNote = fw == fwExpect ? "\(fwExpect) is installed and running." : "The puck restarted on \(fw), not \(fwExpect): it kept its previous firmware."
+                say("Firmware: puck now runs \(fw)")
+                fwExpect = ""
+            }
             if let d = msg["settings"] as? [String: Any], let s = PuckSettings(d) { puckSettings = s }
             readPetHello(msg)
             if !greeted {
@@ -1259,6 +1615,8 @@ final class Bridge {
                 say("Puck connected (firmware \(fw)\(petMax >= 1 ? ", custom characters supported" : ""))")
                 if claudeReadOnce || !axTrusted { tabs = buildTabs(); pushTabs(force: true); pushChats(force: true) }
                 send(["t": "notif.replace", "items": [Any]()])
+                nextAmbient = .distantPast
+                sendSound()
             } else {
                 pushChats()   // only if a tile's value changed
             }
@@ -1272,7 +1630,7 @@ final class Bridge {
             } else {
                 settingsNote = "Saved on the puck."
             }
-            if greeted { pushChats() }
+            if greeted { pushChats(); sendMenu() }
             publish()
         case "machines.list":
             send(["t": "machines.begin"])
@@ -1353,9 +1711,145 @@ final class Bridge {
             }
             say("Puck refused the custom character: \(reason)")
             publish()
+        case "pb.menu.open":
+            sendMenu()
+        case "pb.menu.tap":
+            if let id = msg["id"] as? String { menuTap(id) }
+        case "fw.accept":
+            if let x = fwXfer { x.accepted = true; x.last = Date(); fwNote = "Installing… don't unplug the puck."; pumpFw(); publish() }
+        case "fw.progress":
+            if let x = fwXfer {
+                x.acked = msg["written"] as? Int ?? x.acked
+                x.last = Date()
+                let note = "Installing… \(x.image.data.isEmpty ? 100 : x.acked * 100 / x.image.data.count)% (don't unplug the puck)"
+                if note != fwNote { fwNote = note; publish() }
+                pumpFw()
+            }
+        case "fw.done":
+            if let x = fwXfer {
+                say("Firmware: \(x.image.version) written and verified; the puck is restarting")
+                fwExpect = x.image.version
+                fwXfer = nil
+                fwNote = "Installed. The puck is restarting…"
+                publish()
+            }
+        case "fw.error":
+            let m = msg["message"] as? String ?? "no reason given"
+            if fwXfer != nil {
+                fwXfer = nil
+                fwNote = "The puck didn't take the firmware (\(m)). It's still on \(fw)."
+                say("Firmware: refused (\(m))")
+                syncPets(); publish()
+            }
         default:
             break
         }
+    }
+
+    // ---------- the puck's own Settings menu (Puck Bridge firmware) ----------
+    // The firmware only draws rows and reports taps; each tap moves that setting to its next value here.
+    var menuItems: [(id: String, label: String, value: String)] {
+        var items: [(String, String, String)] = [("character", "Character", characterName(Pref.character))]
+        if let s = puckSettings {
+            items.append(("sound", "Sound", s.muted ? "Off" : soundName(Pref.soundStyle)))
+            items.append(("volume", "Volume", "\(Pref.soundVolume)%"))
+            items.append(("brightness", "Brightness", "\(s.brightness)%"))
+            items.append(("calm", "Calm mode", s.quiet ? "On" : "Off"))
+        }
+        items.append(("clock", "Clock after", Pref.idleMin == 0 ? "Never" : "\(Pref.idleMin) min"))
+        items.append(("clock24", "24-hour clock", Pref.clock24 ? "On" : "Off"))
+        items.append(("weather", "Weather", Pref.weatherOn ? "On" : "Off"))
+        return items
+    }
+
+    func sendMenu() {
+        guard greeted, pbFirmware >= 1 else { return }
+        send(["t": "pb.menu", "title": "Settings",
+              "items": menuItems.map { ["id": $0.id, "label": $0.label, "value": String($0.value.prefix(23))] }])
+    }
+
+    func sendSound(test: Bool = false) {
+        guard greeted, pbFirmware >= 1 else { return }
+        send(["t": "pb.sound", "style": Pref.soundStyle, "volume": Pref.soundVolume, "test": test])
+    }
+
+    func menuTap(_ id: String) {
+        func next<T: Equatable>(_ list: [T], after v: T) -> T { list[((list.firstIndex(of: v) ?? -1) + 1) % list.count] }
+        switch id {
+        case "character":
+            let choices = characterChoices
+            if !choices.isEmpty { Pref.character = next(choices, after: Pref.character); characterChanged() }
+        case "sound":
+            // Off → Chime → Soft → Bell → Digital → Off
+            guard let s = puckSettings else { break }
+            let ids = SOUND_STYLES.map { $0.id }
+            if s.muted { Pref.soundStyle = ids[0]; setPuckSettings(["muted": false]); sendSound(test: true) }
+            else if Pref.soundStyle == ids.last { setPuckSettings(["muted": true]) }
+            else { Pref.soundStyle = next(ids, after: Pref.soundStyle); sendSound(test: true) }
+        case "volume":
+            Pref.soundVolume = next([25, 50, 75, 100], after: Pref.soundVolume); sendSound(test: true)
+        case "brightness":
+            if let s = puckSettings { setPuckSettings(["brightness": [20, 40, 60, 80, 100].first { $0 > s.brightness + 2 } ?? 20]) }
+        case "calm":
+            if let s = puckSettings { setPuckSettings(["quiet": !s.quiet]) }
+        case "clock":
+            Pref.idleMin = next([0, 2, 5, 10, 15, 30], after: Pref.idleMin); nextAmbient = .distantPast
+        case "clock24":
+            Pref.clock24.toggle(); nextAmbient = .distantPast
+        case "weather":
+            Pref.weatherOn.toggle()
+            DispatchQueue.main.async { self.weather?.refresh() }
+            nextAmbient = .distantPast
+        default:
+            break
+        }
+        say("Puck menu → \(id)")
+        sendMenu()
+        publish()
+    }
+
+    // ---------- firmware (over the cable, like OpenHarness does) ----------
+    func offerFirmware(_ img: FirmwareImage) {
+        guard greeted else { fwNote = "Connect the puck first."; publish(); return }
+        guard board != "pro" else { fwNote = "This firmware is for the round puck."; publish(); return }
+        guard fwXfer == nil, petXfer == nil else { fwNote = "Another transfer is running; try again in a moment."; publish(); return }
+        fwXfer = FwTransfer(img)
+        fwNote = "Offering \(img.label) to the puck…"
+        say("Firmware: offering \(img.version) (\(img.data.count) bytes)")
+        send(["t": "fw.offer", "version": img.version, "size": img.data.count, "sha256": img.sha256])
+        publish()
+    }
+
+    /// Same flow control as character packs: ≤ 8 KB frames, ≤ 16 KB ahead of the puck's acks.
+    private func pumpFw() {
+        guard let x = fwXfer, x.accepted else { return }
+        while x.offset < x.image.data.count && x.offset - x.acked < 16 * 1024 && port != nil {
+            let end = min(x.offset + 8192, x.image.data.count)
+            let slice = Array(x.image.data[x.offset..<end])
+            x.offset = end
+            sendFrame(T_FW, slice)
+        }
+    }
+
+    // ---------- clock face ----------
+    /// Pre-formatted strings for the Puck Bridge firmware's clock face; sent each minute.
+    func sendAmbient() {
+        let now = Date()
+        let f = DateFormatter()
+        f.locale = .current
+        var time = "", ampm = ""
+        if Pref.clock24 {
+            f.dateFormat = "HH:mm"; time = f.string(from: now)
+        } else {
+            f.dateFormat = "h:mm"; time = f.string(from: now)
+            f.dateFormat = "a"; ampm = f.string(from: now)
+        }
+        f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
+        let w = weather?.snapshot()
+        send(["t": "ambient", "time": time, "ampm": ampm, "date": f.string(from: now),
+              "temp": w?.temp ?? "", "cond": w?.cond ?? "", "hilo": w?.hilo ?? "", "idleMin": Pref.idleMin])
+        let cal = Calendar.current
+        nextAmbient = cal.date(byAdding: .minute, value: 1, to: cal.dateInterval(of: .minute, for: now)?.start ?? now) ?? now.addingTimeInterval(60)
     }
 
     func openChat(_ id: String, why: String) {
@@ -1387,15 +1881,34 @@ final class Bridge {
     }
 
     func characterChanged() {
-        say("Character: \(characterName(Pref.character))")
+        let id = Pref.character
+        say("Character: \(characterName(id))")
         petNote = ""
+        if isLibrary(id), custom?.libId != id, let c = CharacterLibrary.shared.find(id) {
+            // Convert off the bridge thread, then send it.
+            petNote = "Getting \(c.name) ready…"
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data = try? Data(contentsOf: c.sheet), let cc = try? CustomCharacter.make(data: data, name: c.name) else {
+                    self.perform { $0.petNote = "Couldn't read \(c.name)'s sprite sheet."; $0.publish() }
+                    return
+                }
+                cc.libId = id
+                self.perform { b in
+                    guard Pref.character == id else { return }
+                    b.custom = cc; b.petFailed[cc.id] = nil; b.syncPets(); b.publish()
+                }
+            }
+        }
         syncPets()
-        if greeted { pushChats() }
+        if greeted { pushChats(); sendMenu() }
         publish()
     }
 
-    /// The characters the tile cycles through.
-    var characterChoices: [String] { BUILTIN_CHARACTERS.map { $0.id } + (custom != nil && petMax >= 1 ? [CUSTOM_ID] : []) }
+    /// The characters the puck can show: Fo only exists in newer firmware; imported ones need pet support.
+    var characterChoices: [String] {
+        BUILTIN_CHARACTERS.filter { $0.id != "fo" || pbFirmware >= 1 }.map { $0.id }
+            + (petMax >= 1 ? CharacterLibrary.shared.all.map { $0.id } : [])
+    }
 
     /// A tap (words == nil) or a spoken value on a settings tile. `turn` is the voice turn to answer, if any.
     func tileAct(_ tile: Tile, words: String?, turn: VoiceTurn?) {
@@ -1421,9 +1934,13 @@ final class Bridge {
             var next: String?
             if words != nil {
                 next = BUILTIN_CHARACTERS.first { c in c.aliases.contains { $0.contains(" ") ? heard.contains($0) : tokens.contains($0) } }?.id
-                if next == nil, choices.contains(CUSTOM_ID), !tokens.isDisjoint(with: ["custom", "mine", "own"]) { next = CUSTOM_ID }
-                if next == nil, choices.contains(CUSTOM_ID), let n = Pref.customName?.lowercased(), !n.isEmpty, heard.contains(n) { next = CUSTOM_ID }
-                if next == nil { answer("Say Clawd, Codex, Jolly or Fo", ok: false); return }
+                if next == nil {
+                    next = CharacterLibrary.shared.all.first { c in
+                        let n = c.name.lowercased()
+                        return heard.contains(n) || !tokens.isDisjoint(with: n.split(separator: " ").map(String.init).filter { $0.count > 2 })
+                    }?.id
+                }
+                guard let n = next, choices.contains(n) else { answer("Say a character's name, like Clawd", ok: false); return }
             } else {
                 let i = choices.firstIndex(of: Pref.character) ?? -1
                 next = choices[(i + 1) % choices.count]
@@ -1490,8 +2007,8 @@ final class Bridge {
 
     /// Tell the puck which pack draws for "claude" and send it the pack if it doesn't hold it.
     func syncPets() {
-        guard greeted, petMax >= 1 else { return }
-        let want = Pref.character == CUSTOM_ID ? custom?.id : nil
+        guard greeted, petMax >= 1, fwXfer == nil else { return }
+        let want = isLibrary(Pref.character) && custom?.libId == Pref.character ? custom?.id : nil
         let mapKey = want ?? "-"
         if mapKey != petMapSent {
             send(["t": "pet.map", "all": NSNull(), "engines": want.map { ["claude": $0] } ?? [String: String]()])
@@ -1666,6 +2183,23 @@ final class Bridge {
         let first = !claudeReadOnce
         claudeReadOnce = true
 
+        // On Claude's Code tab the sidebar lists Claude Code sessions, not chats. Recognise them by their titles
+        // (the same ones ~/.claude/projects has) and keep the chat list from the Chat tab.
+        func norm(_ t: String) -> String {
+            String(t.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(40))
+        }
+        let codeTitles = code.map { norm($0.title) }.filter { $0.count >= 6 }
+        if !cur.chats.isEmpty && !codeTitles.isEmpty {
+            let hits = cur.chats.filter { c in
+                let t = norm(c.title)
+                return t.count >= 6 && codeTitles.contains { $0.hasPrefix(t) || t.hasPrefix($0) }
+            }.count
+            let codeTab = hits * 2 >= cur.chats.count
+            if codeTab != inCodeTab { say(codeTab ? "Claude is on its Code tab; keeping the chat list" : "Claude is back on its chats") }
+            inCodeTab = codeTab
+            if codeTab { cur.chats = prev.chats; cur.writing = false }
+        }
+
         if cur.chats.isEmpty && !prev.chats.isEmpty {
             emptyReads += 1
             if emptyReads < 3 { return }
@@ -1831,6 +2365,14 @@ final class Bridge {
                 pendingStop = nil
                 let v = claude.read()
                 if let stop = v.stopButton { say("Puck → stop Claude"); claude.press(stop) } else { toast("Claude isn't writing") }
+            }
+            if greeted && pbFirmware >= 1 && now >= nextAmbient { sendAmbient() }
+            if let x = fwXfer, now.timeIntervalSince(x.last) > (x.accepted ? 20 : 30) {
+                fwXfer = nil
+                fwNote = x.accepted ? "The install stalled. The puck keeps its current firmware; try again."
+                                    : "The puck didn't accept the firmware (it says no while you're talking to it). Try again in a moment."
+                say("Firmware: \(x.accepted ? "transfer stalled" : "offer not accepted")")
+                syncPets(); publish()
             }
             if let x = petXfer, now.timeIntervalSince(x.last) > 10 {
                 send(["t": "pet.drop", "id": x.id])
@@ -2020,7 +2562,8 @@ final class AppModel: ObservableObject {
     @Published var axTrusted = AXIsProcessTrusted()
     @Published var speech = SFSpeechRecognizer.authorizationStatus()
     @Published var loginStatus = SMAppService.mainApp.status
-    @Published var custom: CustomCharacter?
+    @Published var library: [LibraryCharacter] = []
+    @Published var libraryPreviews: [String: NSImage] = [:]
     @Published var customBusy = false
     @Published var customNote = ""
     @Published var updateVersion: String?
@@ -2030,6 +2573,8 @@ final class AppModel: ObservableObject {
     @Published var updateNote = ""
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
+    @Published var weatherNote = ""
+    let weather = WeatherService()
     let signedAs = signingIdentity()
     var onChange: (() -> Void)?
 
@@ -2037,7 +2582,14 @@ final class AppModel: ObservableObject {
         self.bridge = bridge
         self.updater = updater
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshPermissions() }
-        if let name = Pref.customName, let data = try? Data(contentsOf: customSheetURL) { loadCustom(data: data, name: name, save: false) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            CharacterLibrary.shared.migrate()
+            CharacterLibrary.shared.reload()
+            DispatchQueue.main.async {
+                self.reloadLibrary()
+                if isLibrary(Pref.character) { self.bridge.perform { $0.characterChanged() } }
+            }
+        }
     }
 
     func update(_ s: Snapshot) {
@@ -2067,62 +2619,124 @@ final class AppModel: ObservableObject {
         onChange?()
     }
 
-    var characterDetail: String {
-        if !snap.petsSupported && snap.puckConnected { return "This puck's firmware can't hold custom characters." }
-        return snap.character == CUSTOM_ID && !snap.petNote.isEmpty ? snap.petNote : "Your own sprite sheet"
+    func reloadLibrary() {
+        library = CharacterLibrary.shared.all
+        let missing = library.filter { libraryPreviews[$0.id] == nil }
+        guard !missing.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let images = missing.compactMap { c in CharacterLibrary.preview(c.sheet).map { (c.id, $0) } }
+            DispatchQueue.main.async { for (id, img) in images { self.libraryPreviews[id] = img } }
+        }
     }
 
-    func importCustom() {
+    func characterDetail(_ c: LibraryCharacter) -> String {
+        if !snap.petsSupported && snap.puckConnected { return "This puck's firmware can't hold imported characters." }
+        return snap.character == c.id && !snap.petNote.isEmpty ? snap.petNote : "Imported"
+    }
+
+    func importCharacters() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a petdex-style sprite sheet (8 × 9 frames, 1536 × 1872 pixels)"
+        panel.allowedContentTypes = [.zip, .image, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.message = "Choose petdex characters: sprite sheets, folders with pet.json, or .zip files (zips of zips are fine)"
         NSApp.activate()
-        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
-        let name = url.deletingPathExtension().lastPathComponent
-            .replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized
-        loadCustom(data: data, name: String(name.prefix(22)), save: true)
-    }
-
-    func loadCustom(data: Data, name: String, save: Bool) {
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let urls = panel.urls
         customBusy = true
-        customNote = save ? "Converting…" : ""
+        customNote = "Importing…"
         DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let c = try CustomCharacter.make(data: data, name: name)
-                if save {
-                    try FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
-                    try data.write(to: customSheetURL)
-                }
-                DispatchQueue.main.async {
-                    self.customBusy = false
-                    self.custom = c
-                    Pref.customName = c.name
-                    let kb = ((try? c.pack(2).count) ?? 0) / 1024
-                    self.customNote = save ? "Ready (\(kb) KB on the puck)." + (c.pet.warnings.isEmpty ? "" : " " + c.pet.warnings.joined(separator: " ")) : ""
-                    self.bridge.perform { b in b.custom = c; b.petFailed[c.id] = nil; b.syncPets(); b.pushChats(); b.publish() }
-                    if save { self.choose(CUSTOM_ID) }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.customBusy = false
-                    self.customNote = error.localizedDescription
-                    say("Custom character: \(error.localizedDescription)")
-                }
+            let r = CharacterLibrary.shared.importItems(urls)
+            DispatchQueue.main.async {
+                self.customBusy = false
+                self.reloadLibrary()
+                var note = r.added.isEmpty ? "Nothing new added." : "Added \(r.added.map { $0.name }.joined(separator: ", "))."
+                if !r.errors.isEmpty { note += " Skipped: " + r.errors.joined(separator: "; ") }
+                self.customNote = note
+                say("Characters: added \(r.added.count), skipped \(r.errors.count)")
+                if r.added.count == 1 { self.choose(r.added[0].id) }
+                self.bridge.perform { $0.sendMenu() }
             }
         }
     }
 
-    func removeCustom() {
-        try? FileManager.default.removeItem(at: customSheetURL)
-        Pref.customName = nil
-        custom = nil
-        customNote = ""
-        if snap.character == CUSTOM_ID { choose("claude") }
-        bridge.perform { b in b.custom = nil; b.syncPets(); b.pushChats(); b.publish() }
+    func removeCharacter(_ c: LibraryCharacter) {
+        CharacterLibrary.shared.remove(c.id)
+        libraryPreviews[c.id] = nil
+        reloadLibrary()
+        if snap.character == c.id { choose("claude") }
+        bridge.perform { b in if b.custom?.libId == c.id { b.custom = nil }; b.syncPets(); b.sendMenu(); b.publish() }
     }
 
     func refreshPuckList() { bridge.perform { b in if b.greeted { b.pushChats() } } }
+
+    // ---------- clock face + firmware ----------
+    var locationAllowed: Bool { weather.allowed }
+    func weatherChanged() {
+        weatherNote = weather.note
+        objectWillChange.send()
+        clockChanged()
+    }
+    /// Re-send the clock strings now (a setting or the weather changed).
+    func clockChanged() { bridge.perform { $0.nextAmbient = .distantPast } }
+    func allowLocation() {
+        if weather.status == .notDetermined { weather.refresh() }
+        else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!) }
+    }
+    func setWeather(_ on: Bool) { Pref.weatherOn = on; weather.refresh(); weatherChanged() }
+
+    func setSound(style: String? = nil, volume: Int? = nil, test: Bool = true) {
+        if let s = style { Pref.soundStyle = s }
+        if let v = volume { Pref.soundVolume = v }
+        objectWillChange.send()
+        bridge.perform { $0.sendSound(test: test); $0.sendMenu() }
+    }
+
+    func copyClaudeLayout() {
+        bridge.perform { b in
+            let dump = b.claude.layoutDump()
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(dump, forType: .string)
+                self.advancedNote = "Copied Claude's layout (\(dump.split(separator: "\n").count) lines, no message text). Paste it to whoever is helping you."
+            }
+        }
+    }
+
+    func installFirmware() {
+        guard let img = FirmwareImage.bundled else { return }
+        let a = NSAlert()
+        a.messageText = "Install Puck Bridge firmware \(img.version) on the puck?"
+        a.informativeText = """
+            Adds a clock and weather face when the puck is idle, and makes the small button a home button \
+            (tap: clock · hold while Claude writes: stop · hold otherwise: screen off/on).
+
+            It takes about a minute over the cable. Keep the puck plugged in until it restarts. The puck keeps its \
+            previous firmware as a fallback, and Settings → Puck → Restore Official Firmware puts Autonomous's \
+            firmware back. (OpenHarness also reinstalls official firmware if it ever connects.)
+            """
+        a.addButton(withTitle: "Install"); a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        bridge.perform { $0.offerFirmware(img) }
+    }
+    func restoreOfficialFirmware() {
+        let a = NSAlert()
+        a.messageText = "Put the official firmware back on the puck?"
+        a.informativeText = "Puck Bridge downloads Autonomous's current firmware for the round puck, checks it, and installs it over the cable. The clock face and home button go away."
+        a.addButton(withTitle: "Restore"); a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        snap.fwNote = "Downloading the official firmware…"
+        FirmwareImage.official { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let img): self.bridge.perform { $0.offerFirmware(img) }
+                case .failure(let e): self.snap.fwNote = ""; self.alert("Couldn't get the official firmware", e.localizedDescription)
+                }
+            }
+        }
+    }
     func refreshCode() { bridge.perform { b in b.lastCodeRead = .distantPast } }
 
     // ---------- puck settings ----------
@@ -2265,7 +2879,8 @@ final class AppModel: ObservableObject {
         let ps = s.puckSettings.map { "brightness \($0.brightness), beep \($0.muted ? "off" : "on"), calm \($0.quiet), scroll reversed \($0.scrollReversed), voice \($0.voiceLang)" } ?? "not reported"
         let lines = [
             "Puck Bridge v\(versionLine) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
-            s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)"),
+            s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)") + (s.pbFirmware >= 1 ? " · Puck Bridge firmware" : "")
+                + " · bundled firmware: \(FirmwareImage.bundled?.version ?? "none")",
             "Puck settings: \(ps)",
             "Character: \(characterName(s.character)) (\(s.character))\(s.petsSupported ? "" : " · custom characters not supported")\(s.petNote.isEmpty ? "" : " · \(s.petNote)")",
             s.claude,
@@ -2333,6 +2948,10 @@ struct GeneralPane: View {
                               granted: model.axTrusted, action: model.openAccessibility)
                 PermissionRow(title: "Speech Recognition", detail: "Turns what you say into the puck into text, on this Mac.",
                               granted: model.speech == .authorized, action: model.fixSpeech)
+                if Pref.weatherOn {
+                    PermissionRow(title: "Location", detail: "For the weather on the puck's clock face. Only a rounded location goes to Open-Meteo.",
+                                  granted: model.locationAllowed, action: model.allowLocation)
+                }
                 if !model.axTrusted {
                     Text("Already switched on in System Settings? After an update macOS can keep a stale entry. Select Puck Bridge in the list, remove it with −, then add it again with +.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -2453,24 +3072,28 @@ struct CharacterPane: View {
             }
             Section("Built in") {
                 ForEach(BUILTIN_CHARACTERS) { c in
-                    CharacterRow(symbol: c.symbol, name: c.name, detail: c.blurb, image: nil,
-                                 selected: model.snap.character == c.id) { model.choose(c.id) }
+                    let needsFirmware = c.id == "fo" && model.snap.puckConnected && model.snap.pbFirmware < 1
+                    CharacterRow(symbol: c.symbol, name: c.name,
+                                 detail: needsFirmware ? "Needs Puck Bridge firmware (Settings → Puck): the official firmware has no Fo." : c.blurb,
+                                 image: nil, selected: model.snap.character == c.id) { model.choose(c.id) }
+                        .disabled(needsFirmware)
                 }
             }
-            Section("Your own") {
-                if let custom = model.custom {
-                    CharacterRow(symbol: "person.crop.circle", name: custom.name, detail: model.characterDetail, image: custom.preview,
-                                 selected: model.snap.character == CUSTOM_ID) { model.choose(CUSTOM_ID) }
+            Section("Your characters") {
+                ForEach(model.library) { c in
                     HStack {
-                        Button("Replace…") { model.importCustom() }.disabled(model.customBusy)
-                        Button("Remove") { model.removeCustom() }.disabled(model.customBusy)
+                        CharacterRow(symbol: "person.crop.circle", name: c.name, detail: model.characterDetail(c), image: model.libraryPreviews[c.id],
+                                     selected: model.snap.character == c.id) { model.choose(c.id) }
+                        Button(role: .destructive) { model.removeCharacter(c) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless).help("Remove \(c.name)")
                     }
-                } else {
-                    Button("Import a Sprite Sheet…") { model.importCustom() }.disabled(model.customBusy)
                 }
-                if model.customBusy { ProgressView().controlSize(.small) }
+                HStack {
+                    Button("Import Characters…") { model.importCharacters() }.disabled(model.customBusy)
+                    if model.customBusy { ProgressView().controlSize(.small) }
+                }
                 if !model.customNote.isEmpty { Text(model.customNote).font(.caption) }
-                Text("Use a petdex-style sheet: 8 × 9 frames, 1536 × 1872 (or 768 × 936) pixels, PNG or WebP. The puck keeps it in memory, so Puck Bridge sends it again after the puck restarts.")
+                Text("Choose petdex characters: sprite sheets (8 × 9 frames, 1536 × 1872 or 768 × 936, PNG or WebP), folders with a pet.json, or .zip files of them. They stay on this Mac; the puck gets the one you pick over the cable, again after each restart.")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Find characters on petdex.dev", destination: URL(string: "https://petdex.dev")!)
             }
@@ -2482,6 +3105,62 @@ struct CharacterPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct FirmwareSection: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        let s = model.snap
+        Section("Firmware") {
+            if let img = FirmwareImage.bundled {
+                if s.pbFirmware >= 1 && s.fw == img.version {
+                    Text("Puck Bridge firmware \(img.version) is on the puck: the clock face and home button are on.")
+                } else {
+                    HStack {
+                        Text(s.pbFirmware >= 1 ? "A newer Puck Bridge firmware is available (\(img.version))." : "Puck Bridge firmware \(img.version)")
+                        Spacer()
+                        Button(s.pbFirmware >= 1 ? "Update…" : "Install…") { model.installFirmware() }
+                            .disabled(!s.puckConnected || s.fwBusy || s.isPro)
+                    }
+                    Text("Adds a clock and weather face when the puck is idle, and makes the small button a home button: tap for the clock, hold while Claude writes to stop it, hold otherwise to turn the screen off or on.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("This build of Puck Bridge doesn't include puck firmware.").foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Official firmware from Autonomous").foregroundStyle(.secondary)
+                Spacer()
+                Button("Restore…") { model.restoreOfficialFirmware() }.disabled(!s.puckConnected || s.fwBusy || s.isPro)
+            }
+            if !s.fwNote.isEmpty { Text(s.fwNote).font(.caption) }
+        }
+    }
+}
+
+struct ClockSection: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        Section("Clock face") {
+            if model.snap.puckConnected && model.snap.pbFirmware < 1 {
+                Text("Needs Puck Bridge firmware (above).").font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Show the clock when idle for", selection: Binding(get: { Pref.idleMin }, set: { Pref.idleMin = $0; model.clockChanged(); model.objectWillChange.send() })) {
+                Text("Never (small button only)").tag(0)
+                ForEach([2, 5, 10, 15, 30], id: \.self) { m in Text("\(m) minutes").tag(m) }
+            }
+            Toggle("24-hour clock", isOn: Binding(get: { Pref.clock24 }, set: { Pref.clock24 = $0; model.clockChanged(); model.objectWillChange.send() }))
+            Toggle("Show the weather (uses this Mac's location)", isOn: Binding(get: { Pref.weatherOn }, set: { model.setWeather($0); model.objectWillChange.send() }))
+            if Pref.weatherOn && !model.locationAllowed {
+                HStack {
+                    Text("Location isn't allowed yet.").font(.caption)
+                    Spacer()
+                    Button("Allow…") { model.allowLocation() }
+                }
+            }
+            if !model.weatherNote.isEmpty { Text(model.weatherNote).font(.caption).foregroundStyle(.secondary) }
+        }
     }
 }
 
@@ -2500,7 +3179,23 @@ struct PuckPane: View {
                     Toggle("Reverse scrolling", isOn: Binding(get: { s.scrollReversed }, set: { model.setPuck("scrollReversed", $0) }))
                 }
                 Section("Sound") {
-                    Toggle("Beep when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
+                    Toggle("Play a sound when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
+                    if model.snap.pbFirmware >= 1 {
+                        Picker("Sound", selection: Binding(get: { Pref.soundStyle }, set: { model.setSound(style: $0) })) {
+                            ForEach(SOUND_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
+                        }
+                        .disabled(s.muted)
+                        HStack {
+                            Slider(value: Binding(get: { Double(Pref.soundVolume) }, set: { Pref.soundVolume = Int($0); model.objectWillChange.send() }),
+                                   in: 10...100, step: 5,
+                                   label: { Text(verbatim: "Volume \(Pref.soundVolume)%") },
+                                   onEditingChanged: { editing in if !editing { model.setSound() } })
+                            Button("Test") { model.setSound() }
+                        }
+                        .disabled(s.muted)
+                    } else {
+                        Text("Puck Bridge firmware (below) adds a choice of sounds and a volume control.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Voice") {
                     Picker("Language you speak to the puck", selection: Binding(get: { s.voiceLang }, set: { model.setPuck("voiceLang", $0) })) {
@@ -2519,6 +3214,8 @@ struct PuckPane: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            FirmwareSection(model: model)
+            ClockSection(model: model)
             Section("About this puck") {
                 LabeledContent("Firmware", value: model.snap.fw.isEmpty ? "—" : model.snap.fw)
                 LabeledContent("Hardware", value: model.snap.hw.isEmpty ? "—" : model.snap.hw)
@@ -2592,6 +3289,8 @@ struct AdvancedPane: View {
                 HStack {
                     Button("Open Log") { NSWorkspace.shared.open(logURL) }
                     Button("Copy Diagnostics") { model.copyDiagnostics() }
+                    Button("Copy Claude Layout") { model.copyClaudeLayout() }
+                        .help("Claude's window structure (buttons and roles, no message text), for fixing chat detection")
                 }
                 if !model.advancedNote.isEmpty { Text(model.advancedNote).font(.caption).foregroundStyle(.secondary) }
             }
@@ -2642,6 +3341,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         Transcriber.authorize { _ in }
 
+        bridge.weather = model.weather
+        model.weather.onChange = { [weak self] in self?.model.weatherChanged() }
+        model.weather.start()
+
         Thread.detachNewThread { [bridge] in bridge.run() }
 
         // Quietly check for updates shortly after launch, then once a day.
@@ -2681,8 +3384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let characters = NSMenu()
-        var choices = BUILTIN_CHARACTERS.map { ($0.id, $0.name) }
-        if let c = model.custom { choices.append((CUSTOM_ID, c.name)) }
+        var choices = BUILTIN_CHARACTERS.filter { $0.id != "fo" || s.pbFirmware >= 1 || !s.puckConnected }.map { ($0.id, $0.name) }
+        choices += model.library.map { ($0.id, $0.name) }
         for (id, name) in choices {
             let i = add(name, #selector(chooseCharacter(_:)))
             i.representedObject = id
@@ -2690,7 +3393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             characters.addItem(i)
         }
         characters.addItem(.separator())
-        characters.addItem(add(model.custom == nil ? "Use Your Own…" : "Change Your Own…", #selector(openCharacter)))
+        characters.addItem(add("Import Characters…", #selector(openCharacter)))
         let charParent = NSMenuItem(title: "Character: \(characterName(s.character))", action: nil, keyEquivalent: "")
         charParent.submenu = characters
         menu.addItem(charParent)
