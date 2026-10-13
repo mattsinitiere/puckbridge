@@ -9,6 +9,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
 - App icon ("Minimal ◎"): `Resources/AppIcon.svg` → `AppIcon.png`; `build.sh` turns it into `AppIcon.icns`.
 ### Fixed
+- `scripts/*.sh` are now executable in git; the release build failed with "Permission denied" without it.
 - Release workflow: also builds when a release is published in the GitHub UI; a manual run (Actions → Release → Run workflow) builds the chosen tag instead of `main`; the self-signed certificate is trusted on the runner so CI signing actually takes effect (previously it would quietly fall back to ad-hoc); the signature is checked; uploads with `gh` instead of a third-party action.
 
 ## [0.3.0] - 2026-10-13
