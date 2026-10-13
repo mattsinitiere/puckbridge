@@ -20,6 +20,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - The puck connects and shows its settings tiles even before Accessibility is allowed.
 - Transcripts are no longer written to the log (only their word count).
 ### Fixed
+- `scripts/*.sh` weren't executable in git, so the Release workflow failed at the build step ("Permission denied").
 - Restoring OpenHarness didn't hand the puck over: Puck Bridge reopened the port within a fraction of a second.
 - On replies longer than 25 seconds the puck stopped showing Claude as busy, so the character stopped working and the small button could no longer stop Claude. `turn.started` is now refreshed every 10 s.
 - The puck could hang waiting after a recording whose audio was lost (e.g. a reconnect mid-recording); it now always gets an answer.
