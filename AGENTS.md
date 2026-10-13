@@ -67,15 +67,18 @@ Source of truth: **github.com/autonomous-ai/openharness** (MIT). Host side: `cli
 | `voice.transcript` | `routeId:"", text, agentId, agentName, needsConfirm:false, uploadId` | Voice result |
 | `voice.error` | `message, uploadId` | Voice failure (always answer `voice.end`, or the puck hangs) |
 | `toast` | `text` | Brief message on the puck |
+| `swarms` | `selected, items:[{id≤47B, name≤39B, agents, panes}], tiles:[]` | Tab list (max 24). Send only when ids/names/selection change: a new list cancels the user's swipe on the TABS screen. |
 
-Other types the firmware understands but we don't use yet: `focus`, `turn.activity`, `question`, `question.close`, `settings.set`, `companion.*`, `models`, `swarms`, `fw.offer`, `pet.*`, `selection.state`, `carry.state`, `form.state`, `visit.state`.
+Other types the firmware understands but we don't use yet: `focus`, `turn.activity`, `question`, `question.close`, `settings.set`, `companion.*`, `models`, `fw.offer`, `pet.*`, `selection.state`, `carry.state`, `form.state`, `visit.state`.
 
-**Puck → host messages we handle:** `hello`, `pong`, `machines.list`, `machine.select`, `agents.list`, `agents.refresh`, `focus {agentId}` (carousel selection; we open the chat after ~0.8 s settle, ignored in the first 3 s of a session), `agent.open {agentId}` (tap on a card), `turn.stop {agentId}`, `voice.begin {agentId?, sr, lang, uploadId, …}`, PCM frames, `voice.end`, `voice.abort`, `notif.read`.
+**Puck → host messages we handle:** `hello`, `pong`, `machines.list`, `machine.select`, `agents.list`, `agents.refresh`, `focus {agentId}` (carousel selection; we open the chat after ~0.8 s settle, ignored in the first 3 s of a session), `agent.open {agentId}` (tap on a card), `turn.stop {agentId}`, `swarm.select {swarmId}` (sent continuously while the user swipes the TABS carousel), `swarms.list`, `voice.begin {agentId?, sr, lang, uploadId, …}`, PCM frames, `voice.end`, `voice.abort`, `notif.read`.
 
 **Buttons (official firmware ≥0.0.88)**
 - **Large/top** (PWR key on the AXP2101 PMIC): tap toggles the screen. Long press is a **hardware restart in the PMIC and can't be changed**.
 - **Small/bottom** (GPIO0 = **BOOT**): tap cancels voice, or opens the STOP confirm when the focused tile is busy (confirming sends `turn.stop`), or goes home. Hold ≥800 ms toggles the screen. Holding BOOT while plugging in forces ROM download mode, which is the **recovery path for bad firmware**.
 - Button presses are handled entirely on-device. The host never sees them, except via `turn.stop`.
+
+**Tabs (`Bridge.buildTabs`).** Hold the face ≥650 ms → TABS carousel. Tab ids: `chats`, `code`, `p-<fnv64 of folder>`. Switch handshake (firmware `workspace.c`): device sends `swarm.select` → host replies `swarms` with `selected` = that id → device sends `agents.refresh` → host streams `agents.begin`/`agent`×≤16/`agents.end {tab: <that id>}`. The device only lands when `agents.end.tab` matches; otherwise it shows "The tab did not open" after 8 s. Always answer `agents.refresh` with a full list, even if unchanged. Agent ids for Code sessions are `cc-<session uuid>`.
 
 ## Claude Desktop: the Accessibility contract
 
@@ -90,7 +93,7 @@ Bundle id `com.anthropic.claudefordesktop` (Electron). Set `AXManualAccessibilit
 **Known limits, all confirmed by testing**
 - Sidebar status icons do **not** change while a normal chat generates. Idle/Done applies to tasks (Cowork/Dispatch/scheduled).
 - **Background finishes are invisible.** If the user switches away mid-reply, nothing in the UI changes when it completes, and Claude sent no macOS notification while in-app (untested with Claude unfocused, which is worth testing).
-- **Claude Code sessions** live under the Code tab and aren't in the Chat sidebar. They're intentionally not listed, since switching tabs behind the user is disruptive.
+- **Claude Code sessions** live under the Code tab and aren't in the Chat sidebar. We don't switch Claude's tabs behind the user; instead `CodeSessions` reads `~/.claude/projects/<folder>/<session>.jsonl` (first 64 KB: `cwd`, `summary`, first prompt). Unverified: whether Claude Desktop's Code tab stores its sessions there. Opening a Code session in Claude from the puck isn't implemented (needs the Code tab's AX tree).
 - **Project chats** are collapsed under project toggles, so only Recents show.
 
 **Finish detection (`Bridge.checkClaude`)**
@@ -138,4 +141,4 @@ Good next step: add unit tests for the framing/CRC against the shared vectors in
    - An **idle clock + weather face**: the host sends e.g. `{"t":"ambient","time":<epoch>,"tz":"…","tempF":…,"cond":"…"}` every minute. Weather comes from Open-Meteo (free, no key) using a ZIP or coordinates set in the menu.
    - Release firmware through this repo's pipeline. Back up the full 16 MB flash (`esptool read_flash`) before the first flash. Keep OpenHarness's service off, or it will overwrite the firmware. First check secure boot is off (`esptool get_security_info`; the repo docs say Secure Boot v2 isn't enabled yet).
 4. **Voice polish:** a review-before-send flow using the puck's draft UI (`voice.end {review:true}` → `voice.draft`). Optional slash-commands.
-5. Optionally list Claude Code sessions (only if it can be done without switching tabs visibly).
+5. Open Claude Code sessions (and send voice to them) from the puck. Needs a dump of Claude's Code tab AX tree from the user's Mac.
