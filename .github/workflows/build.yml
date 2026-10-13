@@ -1,5 +1,7 @@
 # Compile check + tests on every push and pull request, so a broken main.swift is caught before a release tag.
-# Nothing is published; the zip is kept as a short-lived artifact.
+# Every push also publishes that branch's build as a PREVIEW pre-release ("preview-<branch>", replaced on each push),
+# which Puck Bridge lists under Settings → General → Beta Access. Pre-releases never count as the latest release,
+# so the normal updater and scripts/install.sh don't see them.
 name: Build
 
 on:
@@ -9,7 +11,7 @@ on:
   workflow_dispatch:   # Actions → Build → Run workflow: a fresh build, e.g. right after adding the signing secrets
 
 permissions:
-  contents: read
+  contents: write   # to publish previews
 
 concurrency:
   group: build-${{ github.ref }}
@@ -24,6 +26,16 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Version (a preview is <latest release>.<build number>, e.g. 0.4.0.57)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          BASE="${BASE:-v0.0.0}"
+          echo "VERSION=${BASE#v}.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "PB_CHANNEL=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          echo "PB_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
 
       # Signs with your "Puck Bridge Signing" certificate when the secrets exist, so test builds keep macOS
       # permissions too. Until then, a throwaway certificate tests the same signing path.
@@ -41,7 +53,7 @@ jobs:
           SIGNING_CERT_P12="$SIGNING_CERT_P12" SIGNING_CERT_PASSWORD="$SIGNING_CERT_PASSWORD" scripts/ci-import-cert.sh
 
       - name: Build
-        run: scripts/build.sh v0.0.0
+        run: scripts/build.sh "$VERSION"
 
       - name: Signed with a certificate (so macOS can keep permissions), not ad-hoc
         run: |
@@ -71,6 +83,13 @@ jobs:
             for v in 1 2; do "$BIN" --make-pet "$RUNNER_TEMP/$kind.png" "$RUNNER_TEMP/$kind-v$v.hpet" "$v"; done
           done
           "$RUNNER_TEMP/check_pet_pack" "$RUNNER_TEMP"/*.hpet
+
+      - name: Publish as a preview (Puck Bridge → Settings → General → Beta Access)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ secrets.SIGNING_CERT_P12 != '' }}
+        run: scripts/publish-preview.sh
 
       - uses: actions/upload-artifact@v4
         with:

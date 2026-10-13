@@ -41,6 +41,7 @@ enum Pref {
     static var tab: String { get { d.string(forKey: "tab") ?? "chats" } set { d.set(newValue, forKey: "tab") } }
     /// A built-in character's engine name ("claude", "codex", "muse", "fo") or "custom".
     static var character: String { get { d.string(forKey: "character") ?? "claude" } set { d.set(newValue, forKey: "character") } }
+    static var betaAccess: Bool { get { bool("betaAccess", false) } set { d.set(newValue, forKey: "betaAccess") } }
     static var customName: String? { get { d.string(forKey: "customName") } set { d.set(newValue, forKey: "customName") } }
 }
 
@@ -1864,10 +1865,29 @@ final class Bridge {
 // ============================================================================================
 // MARK: Updates from GitHub Releases
 // ============================================================================================
+/// A branch's latest build, published by the Build workflow as the pre-release "preview-<branch>".
+struct Preview: Identifiable {
+    let id: String          // tag
+    let branch: String
+    let commit: String
+    let version: String
+    let summary: String     // the commit's first line
+    let signed: Bool
+    let date: Date
+    let url: URL
+}
+
+/// One installable build: a release, or a branch preview.
+struct Update { let version: String; let url: URL; let notes: String; let label: String }
+
 final class Updater {
     let repo = (Bundle.main.object(forInfoDictionaryKey: "PBUpdateRepo") as? String ?? "").trimmingCharacters(in: .whitespaces)
     let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-    private(set) var available: (version: String, url: URL, notes: String)?
+    /// The branch this build is a preview of; empty for a release.
+    let channel = (Bundle.main.object(forInfoDictionaryKey: "PBChannel") as? String ?? "").trimmingCharacters(in: .whitespaces)
+    let commit = (Bundle.main.object(forInfoDictionaryKey: "PBCommit") as? String ?? "").trimmingCharacters(in: .whitespaces)
+    var isPreview: Bool { !channel.isEmpty }
+    private(set) var available: Update?
 
     static func newer(_ a: String, than b: String) -> Bool {
         let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
@@ -1878,43 +1898,91 @@ final class Updater {
         return false
     }
 
-    /// Asks GitHub for the latest release. `done(version, nil)`: an update; `(nil, nil)`: up to date; `(nil, error)`: couldn't check.
-    func check(done: @escaping (String?, String?) -> Void) {
-        guard repo.contains("/"), let api = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else {
-            say("Updates: no repository configured in this build"); done(nil, "This build has no update repository configured."); return
+    private func get(_ path: String, _ done: @escaping (Any?, String?) -> Void) {
+        guard repo.contains("/"), let url = URL(string: "https://api.github.com/repos/\(repo)/\(path)") else {
+            done(nil, "This build has no update repository configured."); return
         }
-        var req = URLRequest(url: api)
+        var req = URLRequest(url: url)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         URLSession.shared.dataTask(with: req) { data, resp, err in
-            guard let data = data, (resp as? HTTPURLResponse)?.statusCode == 200,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let tag = json["tag_name"] as? String,
-                  let assets = json["assets"] as? [[String: Any]],
-                  let zip = assets.first(where: { ($0["name"] as? String) == "PuckBridge.zip" }),
-                  let s = zip["browser_download_url"] as? String, let url = URL(string: s) else {
-                let why = err?.localizedDescription ?? "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
-                say("Updates: couldn't check (\(why))")
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard let data = data, code == 200, let json = try? JSONSerialization.jsonObject(with: data) else {
+                let why = err?.localizedDescription ?? (code == 404 ? "no releases yet" : "HTTP \(code)")
                 done(nil, "Couldn't reach GitHub (\(why)).")
                 return
             }
-            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-            if Updater.newer(version, than: self.current) {
-                self.available = (version, url, json["body"] as? String ?? "")
-                say("Updates: \(version) available (running \(self.current))")
-                done(version, nil)
-            } else {
-                done(nil, nil)
-            }
+            done(json, nil)
         }.resume()
     }
 
+    private static func zipURL(_ release: [String: Any]) -> URL? {
+        let assets = release["assets"] as? [[String: Any]] ?? []
+        return (assets.first { ($0["name"] as? String) == "PuckBridge.zip" }?["browser_download_url"] as? String).flatMap(URL.init(string:))
+    }
+
+    /// The latest release (never a preview).
+    func latestRelease(_ done: @escaping (Update?, String?) -> Void) {
+        get("releases/latest") { json, error in
+            guard let r = json as? [String: Any], let tag = r["tag_name"] as? String, let url = Updater.zipURL(r) else {
+                done(nil, error ?? "The latest release has no PuckBridge.zip."); return
+            }
+            let v = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            done(Update(version: v, url: url, notes: r["body"] as? String ?? "", label: "v\(v)"), nil)
+        }
+    }
+
+    /// Every branch preview, newest first.
+    func previews(_ done: @escaping ([Preview]?, String?) -> Void) {
+        get("releases?per_page=100") { json, error in
+            guard let list = json as? [[String: Any]] else { done(nil, error); return }
+            let iso = ISO8601DateFormatter()
+            let out: [Preview] = list.compactMap { r in
+                guard r["prerelease"] as? Bool == true, let tag = r["tag_name"] as? String, tag.hasPrefix("preview-"),
+                      let url = Updater.zipURL(r) else { return nil }
+                var f: [String: String] = [:]
+                for line in (r["body"] as? String ?? "").split(separator: "\n") {
+                    if let c = line.firstIndex(of: ":") {
+                        f[line[..<c].trimmingCharacters(in: .whitespaces)] = line[line.index(after: c)...].trimmingCharacters(in: .whitespaces)
+                    }
+                }
+                guard let branch = f["branch"], let commit = f["commit"], let version = f["version"] else { return nil }
+                let date = (r["published_at"] as? String).flatMap { iso.date(from: $0) } ?? .distantPast
+                return Preview(id: tag, branch: branch, commit: commit, version: version, summary: f["summary"] ?? "",
+                               signed: f["signed"] == "true", date: date, url: url)
+            }
+            done(out.sorted { $0.date > $1.date }, nil)
+        }
+    }
+
+    /// `done(update, nil)`: something to install; `(nil, nil)`: up to date; `(nil, error)`: couldn't check.
+    /// A newer release always wins. With Beta Access, a preview build also follows newer builds of its own branch.
+    func check(beta: Bool, done: @escaping (Update?, String?) -> Void) {
+        latestRelease { rel, error in
+            if let rel = rel, Updater.newer(rel.version, than: self.current) {
+                self.available = rel
+                say("Updates: \(rel.version) available (running \(self.current))")
+                done(rel, nil); return
+            }
+            guard beta && self.isPreview else { done(nil, rel == nil ? error : nil); return }
+            self.previews { list, perror in
+                if let p = list?.first(where: { $0.branch == self.channel }), p.commit != self.commit {
+                    let u = Update(version: p.version, url: p.url, notes: p.summary, label: "the latest \(p.branch) preview")
+                    self.available = u
+                    say("Updates: newer preview of \(p.branch) available (\(p.version))")
+                    done(u, nil)
+                } else {
+                    done(nil, list == nil ? perror : nil)
+                }
+            }
+        }
+    }
+
     /// Download, unpack, swap the app in place (keeping the old copy until the new one is in), relaunch.
-    func install(_ fail: @escaping (String) -> Void) {
-        guard let up = available else { return }
+    func install(_ up: Update, fail: @escaping (String) -> Void) {
         let appPath = Bundle.main.bundlePath
         let parent = (appPath as NSString).deletingLastPathComponent
         guard FileManager.default.isWritableFile(atPath: parent) else { fail("Can't write to \(parent)."); return }
-        say("Updates: downloading \(up.version)…")
+        say("Updates: downloading \(up.label) (\(up.version))…")
         URLSession.shared.downloadTask(with: up.url) { tmp, _, err in
             guard let tmp = tmp else { fail(err?.localizedDescription ?? "Download failed"); return }
             let work = FileManager.default.temporaryDirectory.appendingPathComponent("puckbridge-\(up.version)")
@@ -1956,6 +2024,9 @@ final class AppModel: ObservableObject {
     @Published var customBusy = false
     @Published var customNote = ""
     @Published var updateVersion: String?
+    @Published var previews: [Preview] = []
+    @Published var previewsNote = ""
+    @Published var previewsLoading = false
     @Published var updateNote = ""
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
@@ -2105,36 +2176,69 @@ final class AppModel: ObservableObject {
     }
 
     func checkUpdates(interactive: Bool) {
-        if interactive, updateVersion != nil { confirmInstall(); return }
+        if interactive, let up = updater.available { confirmInstall(up); return }
         if interactive { updateNote = "Checking…" }
-        updater.check { version, error in
+        updater.check(beta: Pref.betaAccess) { up, error in
             DispatchQueue.main.async {
-                if let v = version {
-                    self.updateVersion = v
-                    self.updateNote = "Version \(v) is available."
+                if let up = up {
+                    self.updateVersion = up.version
+                    self.updateNote = "\(up.label.prefix(1).uppercased() + up.label.dropFirst()) is available."
                     self.onChange?()
-                    if interactive { self.confirmInstall() }
+                    if interactive { self.confirmInstall(up) }
                 } else if let e = error {
                     self.updateNote = e
                     if interactive { self.alert("Couldn't check for updates", e) }
                 } else {
                     self.updateNote = "You're up to date."
-                    if interactive { self.alert("You're up to date", "Puck Bridge v\(self.updater.current) is the latest release.") }
+                    if interactive {
+                        self.alert("You're up to date", self.updater.isPreview
+                            ? "This is the newest preview of \(self.updater.channel)."
+                            : "Puck Bridge v\(self.updater.current) is the latest release.")
+                    }
                 }
             }
         }
     }
-    private func confirmInstall() {
-        guard let up = updater.available else { return }
+    private func confirmInstall(_ up: Update) {
         let a = NSAlert()
-        a.messageText = "Install Puck Bridge v\(up.version)?"
-        a.informativeText = (up.notes.isEmpty ? "" : String(up.notes.prefix(600)) + "\n\n") + "The app will restart. You may need to re-allow Accessibility afterwards."
+        a.messageText = "Install \(up.label)?"
+        a.informativeText = (up.notes.isEmpty ? "" : String(up.notes.prefix(600)) + "\n\n")
+            + "Version \(up.version). The app will restart." + (signedAs == nil ? " You may need to re-allow Accessibility afterwards." : "")
         a.addButton(withTitle: "Install"); a.addButton(withTitle: "Later")
         NSApp.activate()
         if a.runModal() == .alertFirstButtonReturn {
             updateNote = "Downloading…"
-            updater.install { msg in DispatchQueue.main.async { self.updateNote = ""; self.alert("Update failed", msg) } }
+            updater.install(up) { msg in DispatchQueue.main.async { self.updateNote = ""; self.alert("Update failed", msg) } }
         }
+    }
+
+    // ---------- Beta Access ----------
+    func loadPreviews() {
+        previewsLoading = true
+        updater.previews { list, error in
+            DispatchQueue.main.async {
+                self.previewsLoading = false
+                self.previews = list ?? []
+                self.previewsNote = list == nil ? (error ?? "") : list!.isEmpty ? "No previews yet. Every branch pushed to GitHub gets one after its build finishes." : ""
+            }
+        }
+    }
+    func installPreview(_ p: Preview) {
+        let warning = p.signed ? "" : " This one was built before signing was set up, so macOS will ask for permissions again."
+        confirmInstall(Update(version: p.version, url: p.url, notes: p.summary + warning, label: "the \(p.branch) preview"))
+    }
+    func installRelease() {
+        updateNote = "Checking…"
+        updater.latestRelease { up, error in
+            DispatchQueue.main.async {
+                self.updateNote = ""
+                if let up = up { self.confirmInstall(Update(version: up.version, url: up.url, notes: up.notes, label: "the \(up.label) release")) }
+                else { self.alert("Couldn't find the release", error ?? "") }
+            }
+        }
+    }
+    var versionLine: String {
+        updater.isPreview ? "\(updater.current) · preview of \(updater.channel) (\(updater.commit.prefix(7)))" : updater.current
     }
 
     func lend() {
@@ -2160,7 +2264,7 @@ final class AppModel: ObservableObject {
         let s = snap
         let ps = s.puckSettings.map { "brightness \($0.brightness), beep \($0.muted ? "off" : "on"), calm \($0.quiet), scroll reversed \($0.scrollReversed), voice \($0.voiceLang)" } ?? "not reported"
         let lines = [
-            "Puck Bridge v\(updater.current) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
+            "Puck Bridge v\(versionLine) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
             s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)"),
             "Puck settings: \(ps)",
             "Character: \(characterName(s.character)) (\(s.character))\(s.petsSupported ? "" : " · custom characters not supported")\(s.petNote.isEmpty ? "" : " · \(s.petNote)")",
@@ -2243,7 +2347,7 @@ struct GeneralPane: View {
                         Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
                     }
                 }
-                LabeledContent("Version", value: model.updater.current)
+                LabeledContent("Version", value: model.versionLine)
                 LabeledContent("Signature", value: model.signedAs.map { "Signed as \($0)" } ?? "Ad-hoc")
                 if model.signedAs == nil {
                     Text("macOS asks for permissions again after every update of an ad-hoc build. Setting up signing once stops that (README: Keep macOS permissions across updates).")
@@ -2254,8 +2358,54 @@ struct GeneralPane: View {
                     Text(model.updateNote).font(.caption).foregroundStyle(.secondary)
                 }
             }
+            BetaSection(model: model)
         }
         .formStyle(.grouped)
+    }
+}
+
+struct BetaSection: View {
+    @ObservedObject var model: AppModel
+    @AppStorage("betaAccess") private var betaAccess = false
+    private static let ago = RelativeDateTimeFormatter()
+    var body: some View {
+        Section("Beta Access") {
+            Toggle("Beta Access: try preview builds of work in progress", isOn: $betaAccess)
+                .onChange(of: betaAccess) { _, on in if on { model.loadPreviews() } }
+            if model.updater.isPreview {
+                HStack {
+                    Text("You're running a preview of \(model.updater.channel).").font(.caption)
+                    Spacer()
+                    Button("Back to the Release…") { model.installRelease() }
+                }
+            }
+            if betaAccess {
+                Text("Each branch on GitHub gets a preview build. Previews can be unfinished or broken; you can always go back to the release. While you run a preview, Check for Updates also follows newer builds of that branch.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(model.previews) { p in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(p.branch).font(.headline)
+                            if !p.summary.isEmpty { Text(p.summary).font(.caption).lineLimit(2) }
+                            Text(verbatim: "\(p.version) · \(p.commit.prefix(7)) · built \(Self.ago.localizedString(for: p.date, relativeTo: Date()))\(p.signed ? "" : " · not signed")")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if p.commit == model.updater.commit {
+                            Text("Running").foregroundStyle(.secondary)
+                        } else {
+                            Button("Install…") { model.installPreview(p) }
+                        }
+                    }
+                }
+                HStack {
+                    Button("Refresh") { model.loadPreviews() }.disabled(model.previewsLoading)
+                    if model.previewsLoading { ProgressView().controlSize(.small) }
+                    if !model.previewsNote.isEmpty { Text(model.previewsNote).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+        }
+        .onAppear { if betaAccess && model.previews.isEmpty { model.loadPreviews() } }
     }
 }
 

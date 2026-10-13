@@ -19,6 +19,9 @@ Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge* (◎
 ## Update
 ◎ menu → **Check for updates…** (it also checks daily). Or re-run the install line.
 
+## Try work in progress (Beta Access)
+Every branch pushed to GitHub gets a preview build. ◎ → Settings… → General → turn on **Beta Access**, then **Install…** next to the branch you want. **Back to the Release…** returns to the normal version. Previews can be unfinished.
+
 ## Make a release
 1. Bump `CHANGELOG.md`.
 2. GitHub → **Releases → Draft a new release** → new tag like `v0.3.1` → **Publish**.
@@ -30,7 +33,7 @@ Without this, every update is signed differently and macOS asks for Accessibilit
    ```bash
    curl -fsSL https://raw.githubusercontent.com/mattsinitiere/puckbridge/main/scripts/make-signing-cert.sh | bash
    ```
-2. It makes a private signing certificate and opens GitHub twice. Each time, paste the name it shows and press ⌘V for the secret, then **Add secret**.
+2. It makes a private signing certificate and opens GitHub twice. (The secrets are for the whole repository: releases, `main` and every preview get signed.) Each time, paste the name it shows and press ⌘V for the secret, then **Add secret**.
 3. Install the next build (a new release, or ◎ → Check for Updates…). macOS asks for permissions **one last time**, then keeps them for every later update.
 
 ◎ → Settings… → General → **Signature** shows *Signed as Puck Bridge Signing* once this is working.

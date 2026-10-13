@@ -3,6 +3,7 @@
 #   scripts/build.sh [version]          -> build/Puck Bridge.app  and  dist/PuckBridge.zip
 # Env: SIGN_IDENTITY  code-signing identity name (default: ad-hoc "-")
 #      PB_REPO        "owner/repo" for in-app updates (default: from GITHUB_REPOSITORY or git remote)
+#      PB_CHANNEL     branch a preview build comes from (empty = a release); PB_COMMIT its commit
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,6 +37,8 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PBUpdateRepo $REPO" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :PBChannel ${PB_CHANNEL:-}" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :PBCommit ${PB_COMMIT:-}" "$APP/Contents/Info.plist"
 
 if ! codesign --force --timestamp=none --sign "$IDENTITY" --identifier dev.sinitiere.puckbridge "$APP" 2>/dev/null; then
   echo "  (signing with '$IDENTITY' failed — falling back to ad-hoc)"

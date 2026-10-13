@@ -26,7 +26,11 @@ scripts/build.sh [vX.Y.Z]     Universal build (arm64 + x86_64) → build/Puck Br
 scripts/dev-install.sh        Build this checkout and install it to /Applications (local testing)
 scripts/install.sh            End-user install/update from the latest GitHub release (curl | bash)
 .github/workflows/release.yml Tag v* (or publishing a release) → build on macOS runner → attach PuckBridge.zip
-.github/workflows/build.yml   Every push/PR: build, then check generated character packs with the firmware's parser
+.github/workflows/build.yml   Every push/PR: build, check character packs with the firmware's parser, publish the branch's preview
+.github/workflows/previews-cleanup.yml  A deleted branch deletes its preview pre-release
+scripts/publish-preview.sh    CI: (re)publish pre-release preview-<branch> with key: value notes the app parses
+scripts/preview-tag.sh        Branch name → preview tag
+scripts/make-signing-cert.sh  Owner, once: signing certificate → repo secrets (scripts/ci-import-cert.sh uses them in CI)
 tests/check_pet_pack.c        Runs an HPET pack through upstream pet_store.c (compiled from a pinned OpenHarness commit)
 tests/make_test_sheet.py      Draws synthetic petdex sheets for that test (stdlib only)
 CHANGELOG.md                  Keep a Changelog format. Update "Unreleased" with every change.
@@ -44,7 +48,8 @@ There is no Swift toolchain on Linux cloud sessions (download.swift.org is block
 - **Release:** update `CHANGELOG.md`, commit, then create a GitHub release with a new tag `vX.Y.Z` (or `git tag vX.Y.Z && git push --tags`). CI builds and attaches `PuckBridge.zip`. Or Actions → Release → Run workflow (branch `main`, tag `vX.Y.Z`), which creates the tag itself; use this from Claude Code cloud sessions, whose git proxy can't push tags. The in-app updater looks for an asset named **exactly** `PuckBridge.zip` containing `Puck Bridge.app`.
 - **Versioning:** the tag is the source of truth (`v0.3.1` → `CFBundleShortVersionString 0.3.1`). Semver: patch = fixes, minor = features, major = breaking changes to puck firmware compatibility.
 - **Signing:** CI (Release *and* Build) signs with the self-signed identity **"Puck Bridge Signing"** if repo secrets `SIGNING_CERT_P12` / `SIGNING_CERT_PASSWORD` exist (`scripts/ci-import-cert.sh`); the owner makes them once with `scripts/make-signing-cert.sh`. Without them, Build signs with a throwaway certificate (to test the path) and Release signs ad-hoc. Settings → General shows which signature the running app has. Ad-hoc builds change identity every release, so **macOS forgets the Accessibility/Speech permissions after each update.** Keep the bundle id `dev.sinitiere.puckbridge` stable. Never commit `.p12` files.
-- **Updates:** `Updater` calls `https://api.github.com/repos/<PBUpdateRepo>/releases/latest` unauthenticated, which requires the repo to stay **public**. Install = download, `ditto -x`, then a detached `/bin/sh` swaps the bundle in place and relaunches.
+- **Updates:** `Updater` calls `https://api.github.com/repos/<PBUpdateRepo>/releases/latest` unauthenticated, which requires the repo to stay **public**.
+- **Previews / Beta Access:** the Build workflow publishes each pushed branch as pre-release `preview-<branch>` (notes carry `branch:`, `commit:`, `version:`, `signed:`, `summary:` lines; version = `<latest release>.<run number>`). Builds carry `PBChannel` (branch, empty for releases) and `PBCommit` in Info.plist. With Pref `betaAccess`, a preview build's update check also offers newer builds of its own branch; a newer release always wins. Actions artifacts can't be used for this: downloading them needs a GitHub login. Install = download, `ditto -x`, then a detached `/bin/sh` swaps the bundle in place and relaunches.
 
 ## The puck: hardware + protocol
 
