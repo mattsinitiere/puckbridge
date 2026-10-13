@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-10-13
 ### Added
 - `firmware/patches/0001-puck-bridge-clock-and-home.patch` (firmware `0.0.88-pb.1`) and `firmware/README.md` (what it changes, the `ambient` / `pb.menu` / `pb.sound` protocol, how to restore). Passes all 33 upstream firmware host contracts.
 - **Puck Bridge firmware** for the round puck: the official firmware plus `firmware/patches` (built in CI from a pinned OpenHarness commit with ESP-IDF 5.5, bundled in the app). Settings → Puck → Firmware installs it over the USB cable; **Restore…** downloads Autonomous's official firmware, checks it, and puts it back. The puck keeps its previous firmware as a fallback.
