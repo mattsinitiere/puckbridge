@@ -1,51 +1,87 @@
+# Builds "Puck Bridge.app" and attaches PuckBridge.zip to the GitHub release.
+#
+# Runs when:
+#   - a release is published (GitHub → Releases → Draft a new release → new tag vX.Y.Z → Publish)
+#   - a v* tag is pushed (creates the release if it doesn't exist yet)
+#   - manually: Actions → Release → Run workflow → enter an existing tag (rebuilds and replaces the zip)
+#
+# Signing: if repo secrets SIGNING_CERT_P12 (base64 .p12) and SIGNING_CERT_PASSWORD exist, the app is
+# signed with "Puck Bridge Signing" so macOS keeps permissions across updates. Otherwise ad-hoc.
 name: Release
 
-# Publishing a release (or pushing a tag like v0.3.0) builds the app and attaches PuckBridge.zip.
 on:
+  release:
+    types: [published]
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version tag to build, e.g. v0.3.0'
+      tag:
+        description: "Existing tag to build, e.g. v0.3.0"
         required: true
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check tag
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' must look like v1.2.3"; exit 1
+          fi
 
-      - name: Import signing certificate (keeps macOS permissions across updates)
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Import signing certificate (optional)
         env:
           SIGNING_CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: |
           if [ -z "$SIGNING_CERT_P12" ]; then
-            echo "No SIGNING_CERT_P12 secret — building ad-hoc signed (macOS will re-ask for permissions after each update)."
+            echo "No SIGNING_CERT_P12 secret: building ad-hoc signed (macOS will re-ask for permissions after updating)."
             exit 0
           fi
-          KC="$RUNNER_TEMP/signing.keychain-db"
-          security create-keychain -p ci "$KC"
+          KC="$RUNNER_TEMP/puckbridge.keychain-db"
+          KC_PW="$(uuidgen)"
+          security create-keychain -p "$KC_PW" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
-          security unlock-keychain -p ci "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
           echo "$SIGNING_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC" >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null
+          # A self-signed certificate must be trusted for code signing before codesign will use it.
+          security find-certificate -c "Puck Bridge Signing" -p "$KC" > "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning "$KC"
           echo "SIGN_IDENTITY=Puck Bridge Signing" >> "$GITHUB_ENV"
 
       - name: Build
-        run: |
-          chmod +x scripts/*.sh
-          scripts/build.sh "${{ github.event.inputs.version || github.ref_name }}"
+        run: scripts/build.sh "$TAG"
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          files: dist/PuckBridge.zip
-          generate_release_notes: true
+      - name: Verify signature
+        run: |
+          codesign --verify --deep --strict "build/Puck Bridge.app"
+          if [ -n "${SIGN_IDENTITY:-}" ] && ! codesign -dv "build/Puck Bridge.app" 2>&1 | grep -q "Authority=$SIGN_IDENTITY"; then
+            echo "::warning::Signing with '$SIGN_IDENTITY' failed; this build is ad-hoc signed. Check the SIGNING_CERT_* secrets."
+          fi
+
+      - name: Attach PuckBridge.zip to the release
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+          fi
+          gh release upload "$TAG" dist/PuckBridge.zip --repo "$GITHUB_REPOSITORY" --clobber
