@@ -24,6 +24,9 @@ enum Pref {
     static var openOnSelect: Bool { get { bool("openOnSelect", true) } set { d.set(newValue, forKey: "openOnSelect") } }
     static var voiceSends: Bool { get { bool("voiceSends", true) } set { d.set(newValue, forKey: "voiceSends") } }
     static var takePuck: Bool { get { bool("takePuck", true) } set { d.set(newValue, forKey: "takePuck") } }
+    static var codeTabs: Bool { get { bool("codeTabs", true) } set { d.set(newValue, forKey: "codeTabs") } }
+    /// The puck tab last chosen ("chats", "code", or "p-<hash>" for one project folder).
+    static var tab: String { get { d.string(forKey: "tab") ?? "chats" } set { d.set(newValue, forKey: "tab") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -282,6 +285,66 @@ final class Claude {
 }
 
 // ============================================================================================
+// MARK: Claude Code sessions (read-only, from ~/.claude/projects)
+// ============================================================================================
+// Claude Code keeps one JSONL transcript per session in ~/.claude/projects/<folder>/<session id>.jsonl.
+// We read only the first few KB of each (working folder + title) and never log what's in them.
+struct CodeSession { let id: String; let title: String; let project: String; let cwd: String; let modified: Date }
+
+final class CodeSessions {
+    static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    private var cache: [String: (modified: Date, session: CodeSession?)] = [:]
+
+    /// Sessions touched in the last `days`, newest first.
+    func recent(days: Double = 30) -> [CodeSession] {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-days * 86400)
+        var out: [CodeSession] = []
+        var alive = Set<String>()
+        for dir in (try? fm.contentsOfDirectory(at: Self.root, includingPropertiesForKeys: nil)) ?? [] {
+            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for f in files where f.pathExtension == "jsonl" && !f.lastPathComponent.hasPrefix("agent-") {
+                guard let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                      m > cutoff else { continue }
+                alive.insert(f.path)
+                if let c = cache[f.path], c.modified == m { if let s = c.session { out.append(s) }; continue }
+                let s = Self.parse(f, modified: m)
+                cache[f.path] = (m, s)
+                if let s = s { out.append(s) }
+            }
+        }
+        cache = cache.filter { alive.contains($0.key) }
+        return out.sorted { $0.modified > $1.modified }
+    }
+
+    private static func parse(_ url: URL, modified: Date) -> CodeSession? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        let head = (try? h.read(upToCount: 64 * 1024)) ?? Data()
+        var cwd = "", summary = "", prompt = ""
+        for line in head.split(separator: UInt8(ascii: "\n")) {
+            guard let o = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if cwd.isEmpty, let c = o["cwd"] as? String { cwd = c }
+            let type = o["type"] as? String
+            if type == "summary", let s = o["summary"] as? String { summary = s }
+            if type == "user", prompt.isEmpty, (o["isMeta"] as? Bool) != true, (o["isSidechain"] as? Bool) != true,
+               let m = o["message"] as? [String: Any] {
+                var t = m["content"] as? String ?? ""
+                if t.isEmpty, let parts = m["content"] as? [[String: Any]] {
+                    t = parts.first(where: { $0["type"] as? String == "text" })?["text"] as? String ?? ""
+                }
+                t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty && !t.hasPrefix("<") && !t.hasPrefix("Caveat:") { prompt = t }
+            }
+        }
+        let title = (summary.isEmpty ? prompt : summary).replacingOccurrences(of: "\n", with: " ")
+        guard !cwd.isEmpty, !title.isEmpty else { return nil }
+        return CodeSession(id: url.deletingPathExtension().lastPathComponent, title: String(title.prefix(80)),
+                           project: (cwd as NSString).lastPathComponent, cwd: cwd, modified: modified)
+    }
+}
+
+// ============================================================================================
 // MARK: Voice: on-device speech -> text
 // ============================================================================================
 struct SimpleError: LocalizedError { let errorDescription: String?; init(_ s: String) { errorDescription = s } }
@@ -343,6 +406,26 @@ let MACHINE_NAME = Host.current().localizedName ?? "Mac"
 
 struct VoiceTurn { var upload: String; var agentId: String?; var rate: Double; var lang: String; var pcm: [UInt8] }
 
+/// One row on the puck: a Claude Desktop chat or a Claude Code session.
+struct PuckItem { let id: String; let name: String; var chat: Chat? = nil; var code: CodeSession? = nil }
+/// One puck tab ("swarm" in the protocol). The firmware allows 24 tabs of 16 rows each.
+struct PuckTab { let id: String; let name: String; let items: [PuckItem] }
+let MAX_TABS = 24, MAX_ROWS = 16
+let CODE_PREFIX = "cc-"
+
+/// Cut to the firmware's name buffer (39 bytes) without splitting a character.
+func fit(_ s: String, bytes: Int = 39) -> String {
+    var out = ""
+    for ch in s { if out.utf8.count + String(ch).utf8.count > bytes { break }; out.append(ch) }
+    return out
+}
+/// Short stable id for a project folder (FNV-1a), so tab ids stay well under the firmware's 47 bytes.
+func tabId(forFolder path: String) -> String {
+    var h: UInt64 = 0xcbf29ce484222325
+    for b in path.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
+    return "p-" + String(h, radix: 16)
+}
+
 final class Bridge {
     let claude = Claude()
     let transcriber = Transcriber()
@@ -354,6 +437,12 @@ final class Bridge {
     var fw = ""
     var view = ClaudeView()
     var pushedKey = ""
+    let codeSessions = CodeSessions()
+    var code: [CodeSession] = []
+    var lastCodeRead = Date.distantPast
+    var tabs: [PuckTab] = []
+    var pushedTabsKey = ""
+    var tabSwitchedAt = Date.distantPast
     var nextPing = Date()
     var lastClaudeRead = Date.distantPast
     var busyNoticeAt = Date.distantPast
@@ -380,7 +469,8 @@ final class Bridge {
     var onStatus: ((String, String) -> Void)?
     private func status() {
         let puck = port == nil ? "Puck: not connected" : greeted ? "Puck: connected (fw \(fw))" : "Puck: connecting…"
-        let cl = claude.app == nil ? "Claude: not running" : "Claude: \(view.chats.count) chats\(view.writing ? " · writing…" : "")"
+        let codeNote = Pref.codeTabs ? " · \(code.count) Code sessions" : ""
+        let cl = claude.app == nil ? "Claude: not running" : "Claude: \(view.chats.count) chats\(codeNote)\(view.writing ? " · writing…" : "")"
         DispatchQueue.main.async { self.onStatus?(puck, cl) }
     }
 
@@ -392,7 +482,7 @@ final class Bridge {
     }
     private func dropPuckLocked(_ why: String) {
         if port != nil { say("Puck disconnected (\(why))") }
-        port = nil; greeted = false; pushedKey = ""; voice = nil; decoder.reset()
+        port = nil; greeted = false; pushedKey = ""; pushedTabsKey = ""; voice = nil; decoder.reset()
     }
     func dropPuck(_ why: String) { sendLock.lock(); dropPuckLocked(why); sendLock.unlock(); status() }
 
@@ -415,17 +505,70 @@ final class Bridge {
         }
     }
 
+    // ---------- tabs ----------
+    /// Chats, then all Claude Code sessions, then one tab per project folder (most recently used first).
+    func buildTabs() -> [PuckTab] {
+        let chats = view.chats.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
+        var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
+        guard Pref.codeTabs, !code.isEmpty else { return out }
+        func row(_ s: CodeSession) -> PuckItem { PuckItem(id: CODE_PREFIX + s.id, name: s.title, code: s) }
+        out.append(PuckTab(id: "code", name: "Claude Code", items: code.prefix(MAX_ROWS).map(row)))
+        var folders: [String] = [], byFolder: [String: [CodeSession]] = [:]
+        for s in code {
+            if byFolder[s.cwd] == nil { folders.append(s.cwd) }
+            byFolder[s.cwd, default: []].append(s)
+        }
+        // Two folders with the same name ("app" and "app") get their parent folder added.
+        let names = folders.map { ($0 as NSString).lastPathComponent }
+        for f in folders.prefix(MAX_TABS - out.count) {
+            let base = (f as NSString).lastPathComponent
+            let parent = ((f as NSString).deletingLastPathComponent as NSString).lastPathComponent
+            let name = names.filter { $0 == base }.count > 1 ? "\(parent)/\(base)" : base
+            out.append(PuckTab(id: tabId(forFolder: f), name: name, items: byFolder[f]!.prefix(MAX_ROWS).map(row)))
+        }
+        return out
+    }
+
+    var currentTab: PuckTab { tabs.first { $0.id == Pref.tab } ?? tabs.first ?? PuckTab(id: "chats", name: "Chats", items: []) }
+
+    /// The tab list. Only sent when a tab is added, removed or renamed (or the selection moves), because
+    /// a new list cancels whatever the user is doing on the puck's tab screen.
+    func pushTabs(force: Bool = false) {
+        let sel = currentTab.id
+        let key = sel + "#" + tabs.map { "\($0.id)=\($0.name)" }.joined(separator: "|")
+        if !force && key == pushedTabsKey { return }
+        pushedTabsKey = key
+        send(["t": "swarms", "selected": sel, "tiles": [Any](),
+              "items": tabs.map { t -> [String: Any] in
+                  ["id": t.id, "name": fit(t.name), "agents": t.items.count, "panes": t.items.count]
+              }])
+    }
+
+    /// The rows of the selected tab. `agents.end.tab` must name that tab: it's how the puck confirms a switch.
     func pushChats(force: Bool = false) {
-        let key = view.chats.map { "\($0.id)=\($0.title)" }.joined(separator: "|")
+        tabs = buildTabs()
+        pushTabs()
+        let tab = currentTab
+        let key = tab.id + "#" + tab.items.map { "\($0.id)=\($0.name)" }.joined(separator: "|")
         if !force && key == pushedKey { return }
         pushedKey = key
         send(["t": "agents.begin"])
-        for c in view.chats {
-            send(["t": "agent", "id": c.id, "name": c.title, "engine": "claude", "model": "", "effort": "",
+        for i in tab.items {
+            send(["t": "agent", "id": i.id, "name": fit(i.name), "engine": "claude", "model": "", "effort": "",
                   "machineId": MACHINE_ID, "machine": MACHINE_NAME])
         }
-        send(["t": "agents.end", "total": view.chats.count, "tab": "claude"])
-        if let s = spinnerChat { send(["t": "turn.started", "agentId": s, "text": "Writing…"]) }
+        send(["t": "agents.end", "total": tab.items.count, "tab": tab.id])
+        if let s = spinnerChat, tab.items.contains(where: { $0.id == s }) {
+            send(["t": "turn.started", "agentId": s, "text": "Writing…"])
+        }
+    }
+
+    func selectTab(_ id: String) {
+        guard let tab = tabs.first(where: { $0.id == id }) else { return }
+        if id != Pref.tab { say("Puck → tab \"\(tab.name)\"") }
+        Pref.tab = id
+        tabSwitchedAt = Date()
+        pushTabs(force: true)   // the puck then asks for the tab's rows (agents.refresh)
     }
 
     func toast(_ s: String) { send(["t": "toast", "text": s]) }
@@ -452,7 +595,7 @@ final class Bridge {
                 fw = msg["fw"] as? String ?? "?"
                 sessionStart = Date()
                 say("Puck connected (firmware \(fw))")
-                if claudeReadOnce { pushChats(force: true) }
+                if claudeReadOnce { tabs = buildTabs(); pushTabs(force: true); pushChats(force: true) }
                 send(["t": "notif.replace", "items": [Any]()])
                 status()
             }
@@ -464,6 +607,10 @@ final class Bridge {
             send(["t": "machine.selected", "machineId": MACHINE_ID])
         case "agents.list", "agents.refresh":
             pushChats(force: true)
+        case "swarms.list":
+            tabs = buildTabs(); pushTabs(force: true)
+        case "swarm.select":
+            if let id = msg["swarmId"] as? String { selectTab(id) }
         case "agent.open":
             if let id = msg["agentId"] as? String { openChat(id, why: "tap") }
         case "focus":
@@ -488,6 +635,11 @@ final class Bridge {
     }
 
     func openChat(_ id: String, why: String) {
+        if id.hasPrefix(CODE_PREFIX) {
+            // Not yet: opening a Code session needs Claude's Code tab mapped (see AGENTS.md roadmap).
+            if why == "tap" { toast("Open Code sessions in Claude for now") }
+            return
+        }
         let v = claude.read()
         guard let chat = v.chats.first(where: { $0.id == id }) else { say("Puck asked for a chat that's no longer in the sidebar"); return }
         say("Puck → open \"\(chat.title)\" (\(why))")
@@ -502,6 +654,10 @@ final class Bridge {
             var m = m
             if !turn.upload.isEmpty { m["uploadId"] = turn.upload }
             send(m)
+        }
+        if turn.agentId?.hasPrefix(CODE_PREFIX) == true {
+            say("Voice: ignored (a Claude Code session was selected; voice only works for chats so far)")
+            reply(["t": "voice.error", "message": "Voice works in the Chats tab for now"]); return
         }
         say("Voice: \(turn.pcm.count / 1024) KB of audio, transcribing…")
         Transcriber.authorize { ok in
@@ -673,7 +829,8 @@ final class Bridge {
             }
             if let f = pendingFocus, Date().timeIntervalSince(f.at) > 0.8 {
                 pendingFocus = nil
-                if Pref.openOnSelect, Date().timeIntervalSince(sessionStart) > 3, f.id != lastOpenedId {
+                if Pref.openOnSelect, Date().timeIntervalSince(sessionStart) > 3,
+                   Date().timeIntervalSince(tabSwitchedAt) > 3, f.id != lastOpenedId {
                     openChat(f.id, why: "selected on the puck")
                 }
             }
@@ -683,6 +840,12 @@ final class Bridge {
     }
 
     func tickClaude() {
+        if Date().timeIntervalSince(lastCodeRead) >= 5.0 {
+            lastCodeRead = Date()
+            let before = code.count
+            code = Pref.codeTabs ? codeSessions.recent() : []
+            if code.count != before { status() }
+        }
         if Date().timeIntervalSince(lastClaudeRead) >= 1.0 { lastClaudeRead = Date(); checkClaude() }
     }
 }
@@ -776,6 +939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var openOnSelectItem: NSMenuItem!
     var voiceSendsItem: NSMenuItem!
     var takePuckItem: NSMenuItem!
+    var codeTabsItem: NSMenuItem!
     var loginItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -789,6 +953,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         openOnSelectItem = add(menu, "Open chats when selected on the puck", #selector(toggleOpenOnSelect))
         voiceSendsItem = add(menu, "Voice: send automatically (off = paste only)", #selector(toggleVoiceSends))
+        codeTabsItem = add(menu, "Puck tabs: show Claude Code sessions", #selector(toggleCodeTabs))
         takePuckItem = add(menu, "Take the puck from OpenHarness automatically", #selector(toggleTakePuck))
         loginItem = add(menu, "Start at login", #selector(toggleLogin))
         menu.addItem(.separator())
@@ -869,12 +1034,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openOnSelectItem.state = Pref.openOnSelect ? .on : .off
         voiceSendsItem.state = Pref.voiceSends ? .on : .off
         takePuckItem.state = Pref.takePuck ? .on : .off
+        codeTabsItem.state = Pref.codeTabs ? .on : .off
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 
     @objc func toggleOpenOnSelect() { Pref.openOnSelect.toggle(); refreshChecks() }
     @objc func toggleVoiceSends() { Pref.voiceSends.toggle(); refreshChecks() }
     @objc func toggleTakePuck() { Pref.takePuck.toggle(); refreshChecks() }
+    @objc func toggleCodeTabs() { Pref.codeTabs.toggle(); refreshChecks() }
     @objc func toggleLogin() {
         do {
             if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }

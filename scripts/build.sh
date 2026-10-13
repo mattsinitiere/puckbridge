@@ -25,6 +25,14 @@ swiftc -O -target x86_64-apple-macos14 -o build/PuckBridge-x86_64 Sources/main.s
 lipo -create build/PuckBridge-arm64 build/PuckBridge-x86_64 -output "$APP/Contents/MacOS/PuckBridge"
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+
+# App icon: Resources/AppIcon.png (1024×1024, drawn from AppIcon.svg) -> AppIcon.icns
+ICONSET="build/AppIcon.iconset"; mkdir -p "$ICONSET"
+for s in 16 32 128 256 512; do
+  sips -z $s $s Resources/AppIcon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s * 2)) $((s * 2)) Resources/AppIcon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PBUpdateRepo $REPO" "$APP/Contents/Info.plist"

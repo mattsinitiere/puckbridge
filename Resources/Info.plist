@@ -6,6 +6,7 @@
 	<key>CFBundleDisplayName</key><string>Puck Bridge</string>
 	<key>CFBundleIdentifier</key><string>dev.sinitiere.puckbridge</string>
 	<key>CFBundleExecutable</key><string>PuckBridge</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>0.0.0</string>
 	<key>CFBundleVersion</key><string>0</string>
