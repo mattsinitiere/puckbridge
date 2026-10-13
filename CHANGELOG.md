@@ -8,7 +8,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 ### Added
 - `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
 ### Fixed
-- Added `.github/workflows/release.yml`, which was missing from the initial upload (v0.3.0 was published without `PuckBridge.zip`). It can also be run by hand (Actions → Release → Run workflow) to rebuild an existing tag.
+- Release workflow: also builds when a release is published in the GitHub UI; a manual run (Actions → Release → Run workflow) builds the chosen tag instead of `main`; the self-signed certificate is trusted on the runner so CI signing actually takes effect (previously it would quietly fall back to ad-hoc); the signature is checked; uploads with `gh` instead of a third-party action.
 
 ## [0.3.0] - 2026-10-13
 First release from this repository.
