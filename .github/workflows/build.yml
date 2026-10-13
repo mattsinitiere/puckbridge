@@ -91,6 +91,19 @@ jobs:
           codesign -d -r- "$APP" 2>&1 | grep "designated"
           codesign -d -r- "$APP" 2>&1 | grep -q 'identifier "dev.sinitiere.puckbridge" and certificate leaf'
 
+      - name: Installer (drag to Applications)
+        run: |
+          python3 -m pip install --quiet --break-system-packages "dmgbuild>=1.6,<2" || python3 -m pip install --quiet "dmgbuild>=1.6,<2"
+          PATH="$(python3 -m site --user-base)/bin:$PATH" scripts/make-dmg.sh
+
+      - name: Bundled puck firmware
+        run: |
+          R="build/Puck Bridge.app/Contents/Resources"
+          if ls firmware/patches/*.patch >/dev/null 2>&1; then
+            test -f "$R/PuckFirmware.bin" && test -f "$R/PuckFirmware.json" || { echo "::error::firmware patches exist but the app has no bundled firmware"; exit 1; }
+            cat "$R/PuckFirmware.json"
+          fi
+
       - name: Custom characters pass the puck firmware's own pack parser
         run: |
           OH="$RUNNER_TEMP/openharness"
@@ -121,5 +134,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PuckBridge-${{ github.sha }}
-          path: dist/PuckBridge.zip
+          path: |
+            dist/PuckBridge.zip
+            dist/PuckBridge.dmg
           retention-days: 7
