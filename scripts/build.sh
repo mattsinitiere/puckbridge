@@ -19,7 +19,7 @@ APP="build/Puck Bridge.app"
 echo "→ Building Puck Bridge $VERSION (updates from: ${REPO:-none})"
 rm -rf build dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
 
-FRAMEWORKS=(-framework Cocoa -framework Speech -framework AVFoundation -framework ServiceManagement)
+FRAMEWORKS=(-framework Cocoa -framework SwiftUI -framework Speech -framework AVFoundation -framework ServiceManagement -framework ImageIO -framework UniformTypeIdentifiers)
 swiftc -O -target arm64-apple-macos14  -o build/PuckBridge-arm64  Sources/main.swift "${FRAMEWORKS[@]}"
 swiftc -O -target x86_64-apple-macos14 -o build/PuckBridge-x86_64 Sources/main.swift "${FRAMEWORKS[@]}"
 lipo -create build/PuckBridge-arm64 build/PuckBridge-x86_64 -output "$APP/Contents/MacOS/PuckBridge"

@@ -6,8 +6,29 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 ### Added
+- **Settings window** (◎ → Settings…, ⌘,) with General, Character, Puck, Claude & Voice and Advanced tabs. It shows live status and a permissions checklist, and opens by itself on first launch if Accessibility isn't allowed yet.
+- **Pick the puck's character:** Clawd (default), Codex Bot, Jolly or Fo, from Settings or the ◎ → Character menu.
+- **Your own character:** import a petdex-style sprite sheet (8 × 9 frames, PNG or WebP). Puck Bridge converts it to the puck's pack format and uploads it over the cable, and sends it again after the puck restarts.
+- **Puck settings from the Mac:** brightness, finish beep (the puck ships muted), calm mode, reverse scrolling and voice language. They're read from and saved on the puck itself.
+- **Settings tiles on the puck:** Character, Beep, Brightness and Calm mode appear after your chats. Tap the face twice to change one, or tap, say a value, and tap. They can be turned off in Settings → Character.
+- Menu: Open Chat submenu, Character submenu, beep toggle, warning icon when Accessibility is missing, Open Claude when it isn't running.
+- Settings: Bring Claude to the front when a chat opens (on by default); hide the start of replies on the puck (privacy); Reconnect puck, Send test alert, Copy diagnostics.
+- `Build` workflow: compiles on every push and pull request, and checks generated character packs with the puck firmware's own parser (`tests/check_pet_pack.c`, `tests/make_test_sheet.py`).
 - `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
+### Changed
+- Settings moved out of the ◎ menu into the Settings window. "Restore OpenHarness service" is now Settings → Advanced → **Lend the Puck to OpenHarness…**, with **Take It Back**.
+- The puck connects and shows its settings tiles even before Accessibility is allowed.
+- Transcripts are no longer written to the log (only their word count).
 ### Fixed
+- Restoring OpenHarness didn't hand the puck over: Puck Bridge reopened the port within a fraction of a second.
+- On replies longer than 25 seconds the puck stopped showing Claude as busy, so the character stopped working and the small button could no longer stop Claude. `turn.started` is now refreshed every 10 s.
+- The puck could hang waiting after a recording whose audio was lost (e.g. a reconnect mid-recording); it now always gets an answer.
+- Voice could paste into another app if Claude didn't come to the front in time. Pasting no longer wipes images or files from the clipboard.
+- A stale "writing" spinner stayed on the puck if Claude quit mid-reply.
+- "You're up to date" was shown when the update check had actually failed.
+- Alerts could open behind other windows.
+- An update that failed halfway could delete the app; the old copy is now kept until the new one is in place.
+- Puck I/O from voice and menu actions now runs on the bridge thread (fixes data races).
 - Release workflow: also builds when a release is published in the GitHub UI; a manual run (Actions → Release → Run workflow) builds the chosen tag instead of `main`; the self-signed certificate is trusted on the runner so CI signing actually takes effect (previously it would quietly fall back to ad-hoc); the signature is checked; uploads with `gh` instead of a third-party action.
 
 ## [0.3.0] - 2026-10-13
