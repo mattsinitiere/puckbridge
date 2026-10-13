@@ -7,6 +7,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 ## [Unreleased]
 ### Added
 - `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
+- Reads recent Claude Code sessions (folder + title only) from `~/.claude/projects`; groundwork for puck tabs.
 - App icon ("Minimal ◎"): `Resources/AppIcon.svg` → `AppIcon.png`; `build.sh` turns it into `AppIcon.icns`.
 ### Fixed
 - Release build failed with "Permission denied": `scripts/*.sh` are now executable in git, and the workflow runs `bash scripts/build.sh` so older tags build too.

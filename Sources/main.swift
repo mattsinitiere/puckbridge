@@ -282,6 +282,66 @@ final class Claude {
 }
 
 // ============================================================================================
+// MARK: Claude Code sessions (read-only, from ~/.claude/projects)
+// ============================================================================================
+// Claude Code keeps one JSONL transcript per session in ~/.claude/projects/<folder>/<session id>.jsonl.
+// We read only the first few KB of each (working folder + title) and never log what's in them.
+struct CodeSession { let id: String; let title: String; let project: String; let cwd: String; let modified: Date }
+
+final class CodeSessions {
+    static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    private var cache: [String: (modified: Date, session: CodeSession?)] = [:]
+
+    /// Sessions touched in the last `days`, newest first.
+    func recent(days: Double = 30) -> [CodeSession] {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-days * 86400)
+        var out: [CodeSession] = []
+        var alive = Set<String>()
+        for dir in (try? fm.contentsOfDirectory(at: Self.root, includingPropertiesForKeys: nil)) ?? [] {
+            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for f in files where f.pathExtension == "jsonl" && !f.lastPathComponent.hasPrefix("agent-") {
+                guard let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                      m > cutoff else { continue }
+                alive.insert(f.path)
+                if let c = cache[f.path], c.modified == m { if let s = c.session { out.append(s) }; continue }
+                let s = Self.parse(f, modified: m)
+                cache[f.path] = (m, s)
+                if let s = s { out.append(s) }
+            }
+        }
+        cache = cache.filter { alive.contains($0.key) }
+        return out.sorted { $0.modified > $1.modified }
+    }
+
+    private static func parse(_ url: URL, modified: Date) -> CodeSession? {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? h.close() }
+        let head = (try? h.read(upToCount: 64 * 1024)) ?? Data()
+        var cwd = "", summary = "", prompt = ""
+        for line in head.split(separator: UInt8(ascii: "\n")) {
+            guard let o = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            if cwd.isEmpty, let c = o["cwd"] as? String { cwd = c }
+            let type = o["type"] as? String
+            if type == "summary", let s = o["summary"] as? String { summary = s }
+            if type == "user", prompt.isEmpty, (o["isMeta"] as? Bool) != true, (o["isSidechain"] as? Bool) != true,
+               let m = o["message"] as? [String: Any] {
+                var t = m["content"] as? String ?? ""
+                if t.isEmpty, let parts = m["content"] as? [[String: Any]] {
+                    t = parts.first(where: { $0["type"] as? String == "text" })?["text"] as? String ?? ""
+                }
+                t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty && !t.hasPrefix("<") && !t.hasPrefix("Caveat:") { prompt = t }
+            }
+        }
+        let title = (summary.isEmpty ? prompt : summary).replacingOccurrences(of: "\n", with: " ")
+        guard !cwd.isEmpty, !title.isEmpty else { return nil }
+        return CodeSession(id: url.deletingPathExtension().lastPathComponent, title: String(title.prefix(80)),
+                           project: (cwd as NSString).lastPathComponent, cwd: cwd, modified: modified)
+    }
+}
+
+// ============================================================================================
 // MARK: Voice: on-device speech -> text
 // ============================================================================================
 struct SimpleError: LocalizedError { let errorDescription: String?; init(_ s: String) { errorDescription = s } }
