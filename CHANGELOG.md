@@ -13,11 +13,13 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - **Settings tiles on the puck:** Character, Beep, Brightness and Calm mode appear after your chats. Tap the face twice to change one, or tap, say a value, and tap. They can be turned off in Settings → Character.
 - Menu: Open Chat submenu, Character submenu, beep toggle, warning icon when Accessibility is missing, Open Claude when it isn't running.
 - Settings: Bring Claude to the front when a chat opens (on by default); hide the start of replies on the puck (privacy); Reconnect puck, Send test alert, Copy diagnostics.
+- `scripts/make-signing-cert.sh`: one paste in Terminal makes the signing certificate and walks you through adding it to GitHub, so macOS stops re-asking for permissions after every update. Settings → General shows whether the running app is signed.
 - `Build` workflow: compiles on every push and pull request, and checks generated character packs with the puck firmware's own parser (`tests/check_pet_pack.c`, `tests/make_test_sheet.py`).
 - `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
 ### Changed
 - Settings moved out of the ◎ menu into the Settings window. "Restore OpenHarness service" is now Settings → Advanced → **Lend the Puck to OpenHarness…**, with **Take It Back**.
 - The puck connects and shows its settings tiles even before Accessibility is allowed.
+- Test builds from the Build workflow are signed too: with your certificate once it's set up, otherwise with a throwaway one that tests the signing path. Both workflows share `scripts/ci-import-cert.sh`.
 - Transcripts are no longer written to the log (only their word count).
 ### Fixed
 - `scripts/*.sh` weren't executable in git, so the Release workflow failed at the build step ("Permission denied").

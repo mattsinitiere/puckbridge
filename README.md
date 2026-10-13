@@ -25,14 +25,15 @@ Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge* (◎
 3. The *Release* workflow builds the app and attaches `PuckBridge.zip` (~3 min).
 
 ## Keep macOS permissions across updates (recommended, one-time)
-Without this, every update is signed differently and macOS asks for Accessibility again.
-1. Keychain Access → Certificate Assistant → **Create a Certificate…**
-   Name `Puck Bridge Signing`, Identity Type *Self Signed Root*, Certificate Type **Code Signing** → Create.
-2. In Keychain Access (login → My Certificates) right-click it → **Export…** → `.p12` with a password.
-3. `base64 -i PuckBridgeSigning.p12 | pbcopy`
-4. Repo → Settings → Secrets and variables → Actions → add
-   `SIGNING_CERT_P12` (paste) and `SIGNING_CERT_PASSWORD`.
-5. Delete the exported `.p12` file.
+Without this, every update is signed differently and macOS asks for Accessibility and Speech Recognition again.
+1. Open **Terminal** and paste:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/mattsinitiere/puckbridge/main/scripts/make-signing-cert.sh | bash
+   ```
+2. It makes a private signing certificate and opens GitHub twice. Each time, paste the name it shows and press ⌘V for the secret, then **Add secret**.
+3. Install the next build (a new release, or ◎ → Check for Updates…). macOS asks for permissions **one last time**, then keeps them for every later update.
+
+◎ → Settings… → General → **Signature** shows *Signed as Puck Bridge Signing* once this is working.
 
 ## Buttons (current official firmware)
 | Button | Tap | Hold |

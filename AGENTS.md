@@ -43,7 +43,7 @@ There is no Swift toolchain on Linux cloud sessions (download.swift.org is block
 - **Local test:** `scripts/dev-install.sh`, then `tail -f ~/Library/Logs/PuckBridge.log`.
 - **Release:** update `CHANGELOG.md`, commit, then create a GitHub release with a new tag `vX.Y.Z` (or `git tag vX.Y.Z && git push --tags`). CI builds and attaches `PuckBridge.zip`. The in-app updater looks for an asset named **exactly** `PuckBridge.zip` containing `Puck Bridge.app`.
 - **Versioning:** the tag is the source of truth (`v0.3.1` → `CFBundleShortVersionString 0.3.1`). Semver: patch = fixes, minor = features, major = breaking changes to puck firmware compatibility.
-- **Signing:** CI signs with the self-signed identity **"Puck Bridge Signing"** if repo secrets `SIGNING_CERT_P12` / `SIGNING_CERT_PASSWORD` exist, otherwise ad-hoc. Ad-hoc builds change identity every release, so **macOS forgets the Accessibility/Speech permissions after each update.** Keep the bundle id `dev.sinitiere.puckbridge` stable. Never commit `.p12` files.
+- **Signing:** CI (Release *and* Build) signs with the self-signed identity **"Puck Bridge Signing"** if repo secrets `SIGNING_CERT_P12` / `SIGNING_CERT_PASSWORD` exist (`scripts/ci-import-cert.sh`); the owner makes them once with `scripts/make-signing-cert.sh`. Without them, Build signs with a throwaway certificate (to test the path) and Release signs ad-hoc. Settings → General shows which signature the running app has. Ad-hoc builds change identity every release, so **macOS forgets the Accessibility/Speech permissions after each update.** Keep the bundle id `dev.sinitiere.puckbridge` stable. Never commit `.p12` files.
 - **Updates:** `Updater` calls `https://api.github.com/repos/<PBUpdateRepo>/releases/latest` unauthenticated, which requires the repo to stay **public**. Install = download, `ditto -x`, then a detached `/bin/sh` swaps the bundle in place and relaunches.
 
 ## The puck: hardware + protocol
@@ -158,7 +158,7 @@ Good next step: add unit tests for the framing/CRC against the shared vectors in
 
 ## Roadmap
 
-1. **Signing certificate in CI** so permissions survive updates (README has steps). This is the user's to-do.
+1. **Signing certificate in CI** so permissions survive updates: the owner runs `scripts/make-signing-cert.sh` once (README). This is the user's to-do.
 2. **Background-finish alerts:** test whether Claude posts macOS notifications when its window is unfocused. If it does, read Notification Center banners via AX and forward them.
 3. **Custom firmware ("Step 6"):** fork `devices/harness-device/firmware` (ESP-IDF 5.5+, ESP32-S3, 466×466 round AMOLED). Goals:
    - Report button gestures to the host instead of hard-coding them: e.g. `{"t":"button","id":"top|bottom","gesture":"tap|double|hold"}`, advertised via a `hello` capability like `buttons:"events-v1"`. Puck Bridge then maps gestures to actions from the menu (screen on/off, stop Claude, start voice, next/prev chat, open Claude). The top long-press stays a hardware restart.

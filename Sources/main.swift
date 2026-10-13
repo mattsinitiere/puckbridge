@@ -18,6 +18,7 @@ import Darwin
 import Speech
 import AVFoundation
 import ServiceManagement
+import Security
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -69,6 +70,20 @@ func startOpenHarness() {
     let plist = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/LaunchAgents/\(HARNESSD).plist").path
     launchctl(["bootstrap", "gui/\(getuid())", plist])
+}
+
+/// The certificate this app is signed with ("Puck Bridge Signing"), or nil when ad-hoc signed. macOS remembers
+/// permissions per signing identity: ad-hoc builds get a new identity every build, so every update re-asks.
+func signingIdentity() -> String? {
+    var code: SecCode?
+    guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let me = code else { return nil }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(me, SecCSFlags(), &staticCode) == errSecSuccess, let sc = staticCode else { return nil }
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(sc, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+          let d = info as? [String: Any],
+          let certs = d[kSecCodeInfoCertificates as String] as? [SecCertificate], let leaf = certs.first else { return nil }
+    return (SecCertificateCopySubjectSummary(leaf) as String?) ?? "a certificate"
 }
 
 // ============================================================================================
@@ -1695,6 +1710,7 @@ final class AppModel: ObservableObject {
     @Published var updateNote = ""
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
+    let signedAs = signingIdentity()
     var onChange: (() -> Void)?
 
     init(bridge: Bridge, updater: Updater) {
@@ -1894,7 +1910,7 @@ final class AppModel: ObservableObject {
         let s = snap
         let ps = s.puckSettings.map { "brightness \($0.brightness), beep \($0.muted ? "off" : "on"), calm \($0.quiet), scroll reversed \($0.scrollReversed), voice \($0.voiceLang)" } ?? "not reported"
         let lines = [
-            "Puck Bridge v\(updater.current) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString)",
+            "Puck Bridge v\(updater.current) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
             s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)"),
             "Puck settings: \(ps)",
             "Character: \(characterName(s.character)) (\(s.character))\(s.petsSupported ? "" : " · custom characters not supported")\(s.petNote.isEmpty ? "" : " · \(s.petNote)")",
@@ -1978,6 +1994,11 @@ struct GeneralPane: View {
                     }
                 }
                 LabeledContent("Version", value: model.updater.current)
+                LabeledContent("Signature", value: model.signedAs.map { "Signed as \($0)" } ?? "Ad-hoc")
+                if model.signedAs == nil {
+                    Text("macOS asks for permissions again after every update of an ad-hoc build. Setting up signing once stops that (README: Keep macOS permissions across updates).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Button(model.updateVersion.map { "Install v\($0)…" } ?? "Check for Updates…") { model.checkUpdates(interactive: true) }
                     Text(model.updateNote).font(.caption).foregroundStyle(.secondary)
