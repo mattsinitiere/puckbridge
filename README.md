@@ -6,13 +6,15 @@ Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop**
 - Claude finishes a reply → the puck beeps and shows the start of the reply.
 - Tap-and-speak on the puck → transcribed on your Mac → typed into the chat and sent.
 - Small (bottom) button while Claude is writing → stop Claude.
+- Pick the little character on the puck (Clawd, Codex Bot, Jolly, Fo), or import your own petdex sprite sheet.
+- Change the puck's brightness, beep and more from ◎ → **Settings…**, or from the settings tiles at the end of the puck's list.
 - Updates itself from this repo's Releases.
 
 ## Install on a Mac
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattsinitiere/puckbridge/main/scripts/install.sh | bash
 ```
-Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge*, and ◎ → **Start at login**.
+Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge* (◎ → **Settings…** → General shows what's missing), and turn on **Start Puck Bridge when you log in** there.
 
 ## Update
 ◎ menu → **Check for updates…** (it also checks daily). Or re-run the install line.
@@ -47,5 +49,6 @@ tail -f ~/Library/Logs/PuckBridge.log
 ```
 
 ## Troubleshooting
-- **"held by OpenHarness"** — the app stops OpenHarness's service automatically; to give the puck back use ◎ → *Restore OpenHarness service*.
+- **"held by OpenHarness"** — the app stops OpenHarness's service automatically; to give the puck back use ◎ → Settings… → Advanced → *Lend the Puck to OpenHarness…* (and *Take It Back* later).
+- **No beep when Claude finishes** — new pucks ship with the beep off: ◎ → *Beep When Claude Finishes*.
 - **Chats stopped appearing after an update** — System Settings → Privacy & Security → Accessibility → toggle Puck Bridge off/on (or set up the signing certificate above).
