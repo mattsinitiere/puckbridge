@@ -1,0 +1,28 @@
+# Compile check: builds the app on every push and pull request so a broken main.swift is caught
+# before a release tag is pushed. Nothing is published; the zip is kept as a short-lived artifact.
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: scripts/build.sh v0.0.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PuckBridge-${{ github.sha }}
+          path: dist/PuckBridge.zip
+          retention-days: 7
