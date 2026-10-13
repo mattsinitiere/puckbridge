@@ -3,7 +3,8 @@
 # Runs when:
 #   - a release is published (GitHub → Releases → Draft a new release → new tag vX.Y.Z → Publish)
 #   - a v* tag is pushed (creates the release if it doesn't exist yet)
-#   - manually: Actions → Release → Run workflow → enter an existing tag (rebuilds and replaces the zip)
+#   - manually: Actions → Release → Run workflow → enter a tag. An existing tag is rebuilt (the zip is replaced);
+#     a new one is created on the commit the run was started from (pick the branch, normally main).
 #
 # Signing: if repo secrets SIGNING_CERT_P12 (base64 .p12) and SIGNING_CERT_PASSWORD exist, the app is
 # signed with "Puck Bridge Signing" so macOS keeps permissions across updates. Otherwise ad-hoc.
@@ -18,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build, e.g. v0.3.0"
+        description: "Tag to build, e.g. v0.4.0 (a new tag is created on the chosen branch)"
         required: true
 
 permissions:
@@ -36,23 +37,33 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check tag
+        id: tag
         run: |
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Tag '$TAG' must look like v1.2.3"; exit 1
           fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "ref=$TAG" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Tag $TAG doesn't exist yet: it will be created on $GITHUB_SHA ($GITHUB_REF_NAME)."
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Tag $TAG not found"; exit 1
+          fi
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ steps.tag.outputs.ref }}
 
       - name: Import signing certificate (optional)
         env:
           SIGNING_CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
           SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
-        run: scripts/ci-import-cert.sh
+        # Older tags don't have the script; they build ad-hoc.
+        run: if [ -f scripts/ci-import-cert.sh ]; then bash scripts/ci-import-cert.sh; else echo "::warning::This tag predates scripts/ci-import-cert.sh: ad-hoc signed."; fi
 
       - name: Build
-        run: scripts/build.sh "$TAG"
+        run: bash scripts/build.sh "$TAG"   # bash: older tags have the script without its executable bit
 
       - name: Verify signature
         run: |
@@ -64,6 +75,10 @@ jobs:
       - name: Attach PuckBridge.zip to the release
         run: |
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+            # Notes: this version's section of CHANGELOG.md (shown in the app's update dialog), else GitHub's own.
+            awk -v v="${TAG#v}" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+            if [ -s "$RUNNER_TEMP/notes.md" ]; then NOTES=(--notes-file "$RUNNER_TEMP/notes.md"); else NOTES=(--generate-notes); fi
+            # --target only matters for a new tag (created on the commit that was built).
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" "${NOTES[@]}" --target "$(git rev-parse HEAD)"
           fi
           gh release upload "$TAG" dist/PuckBridge.zip --repo "$GITHUB_REPOSITORY" --clobber

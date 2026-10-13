@@ -7,7 +7,7 @@ Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop**
 - Tap-and-speak on the puck → transcribed on your Mac → typed into the chat and sent.
 - Small (bottom) button while Claude is writing → stop Claude.
 - Pick the little character on the puck (Clawd, Codex Bot, Jolly, Fo), or import your own petdex sprite sheet.
-- Change the puck's brightness, beep and more from ◎ → **Settings…**, or from the settings tiles at the end of the puck's list.
+- Change the puck's brightness, beep and more from ◎ → **Settings…**, or from the puck's **Settings** tab (hold the puck's face to switch tabs).
 - Updates itself from this repo's Releases.
 
 ## Install on a Mac

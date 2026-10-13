@@ -41,7 +41,7 @@ There is no Swift toolchain on Linux cloud sessions (download.swift.org is block
 
 - **Requirements:** macOS 14+, Xcode command-line tools (`swiftc`). No SwiftPM, no Xcode project. Keep it that way unless there's a strong reason.
 - **Local test:** `scripts/dev-install.sh`, then `tail -f ~/Library/Logs/PuckBridge.log`.
-- **Release:** update `CHANGELOG.md`, commit, then create a GitHub release with a new tag `vX.Y.Z` (or `git tag vX.Y.Z && git push --tags`). CI builds and attaches `PuckBridge.zip`. The in-app updater looks for an asset named **exactly** `PuckBridge.zip` containing `Puck Bridge.app`.
+- **Release:** update `CHANGELOG.md`, commit, then create a GitHub release with a new tag `vX.Y.Z` (or `git tag vX.Y.Z && git push --tags`). CI builds and attaches `PuckBridge.zip`. Or Actions → Release → Run workflow (branch `main`, tag `vX.Y.Z`), which creates the tag itself; use this from Claude Code cloud sessions, whose git proxy can't push tags. The in-app updater looks for an asset named **exactly** `PuckBridge.zip` containing `Puck Bridge.app`.
 - **Versioning:** the tag is the source of truth (`v0.3.1` → `CFBundleShortVersionString 0.3.1`). Semver: patch = fixes, minor = features, major = breaking changes to puck firmware compatibility.
 - **Signing:** CI (Release *and* Build) signs with the self-signed identity **"Puck Bridge Signing"** if repo secrets `SIGNING_CERT_P12` / `SIGNING_CERT_PASSWORD` exist (`scripts/ci-import-cert.sh`); the owner makes them once with `scripts/make-signing-cert.sh`. Without them, Build signs with a throwaway certificate (to test the path) and Release signs ad-hoc. Settings → General shows which signature the running app has. Ad-hoc builds change identity every release, so **macOS forgets the Accessibility/Speech permissions after each update.** Keep the bundle id `dev.sinitiere.puckbridge` stable. Never commit `.p12` files.
 - **Updates:** `Updater` calls `https://api.github.com/repos/<PBUpdateRepo>/releases/latest` unauthenticated, which requires the repo to stay **public**. Install = download, `ditto -x`, then a detached `/bin/sh` swaps the bundle in place and relaunches.
@@ -80,10 +80,11 @@ Source of truth: **github.com/autonomous-ai/openharness** (MIT). Host side: `cli
 | `settings.set` | any of `brightness 0-100, muted, quiet, scrollReversed, voiceLang (≤7)` (also `focusFace, straightTitle, followCompanion, character`) | Partial update; one bad field rejects the frame. Replies `settings.state {ok, error?, settings}` twice (immediately, then after the NVS write). Empty `settings.set` = read. |
 | `pet.map` | `all: id\|null, engines: {engine: id}` | Which custom pack draws for which engine. RAM only, no reply. |
 | `pet.offer` / `pet.drop` | `id (16 hex), size, crc` / `id` | Start/abandon a custom-pet upload (see Characters) |
+| `swarms` | `selected, items:[{id≤47B, name≤39B, agents, panes}], tiles:[]` | Tab list (max 24). Send only when ids/names/selection change: a new list cancels the user's swipe on the TABS screen. |
 
-Other types the firmware understands but we don't use yet: `focus`, `turn.activity`, `question`, `question.close`, `settings.set`, `companion.*`, `models`, `swarms`, `fw.offer`, `pet.*`, `selection.state`, `carry.state`, `form.state`, `visit.state`.
+Other types the firmware understands but we don't use yet: `turn.activity`, `question`, `question.close`, `companion.*`, `models`, `fw.offer`, `selection.state`, `carry.state`, `form.state`, `visit.state`.
 
-**Puck → host messages we handle:** `hello`, `pong`, `machines.list`, `machine.select`, `agents.list`, `agents.refresh`, `focus {agentId}` (carousel selection; we open the chat after ~0.8 s settle, ignored in the first 3 s of a session), `agent.open {agentId}` (tap on a card), `turn.stop {agentId}`, `voice.begin {agentId?, sr, lang, uploadId, …}`, PCM frames, `voice.end`, `voice.abort`, `notif.read`, `settings.state`, `pet.accept` / `pet.progress {written}` / `pet.done` / `pet.error {reason}`.
+**Puck → host messages we handle:** `hello`, `pong`, `machines.list`, `machine.select`, `agents.list`, `agents.refresh`, `focus {agentId}` (carousel selection; we open the chat after ~0.8 s settle, ignored in the first 3 s of a session), `agent.open {agentId}` (tap on a card), `turn.stop {agentId}`, `swarm.select {swarmId}` (sent continuously while the user swipes the TABS carousel), `swarms.list`, `voice.begin {agentId?, sr, lang, uploadId, …}`, PCM frames, `voice.end`, `voice.abort`, `notif.read`, `settings.state`, `pet.accept` / `pet.progress {written}` / `pet.done` / `pet.error {reason}`.
 
 **Busy expires.** The puck drops a tile's busy state 25 s after the last `turn.started` (`ui_prune_stale_busy`), which stops the working animation and the STOP option. The bridge re-sends `turn.started` every 10 s while Claude writes. `turn.activity` does not refresh it.
 
@@ -93,13 +94,15 @@ Other types the firmware understands but we don't use yet: `focus`, `turn.activi
 - `settings.set {character}`, `companion.set` and `followCompanion` do **nothing** on official builds (`HABITAT_FOCUS_ONLY`). Don't build on them.
 - **Custom packs (HPET, frame type 0x05):** `pet.offer` → `pet.accept` → raw pack bytes in ≤ 8 KB frames, **never more than 16 KB ahead of the last `pet.progress`** (the USB link drops bytes silently past that) → `pet.done` or `pet.error {crc|version|shape|busy|memory}`. 1 MB max, 4 packs max, held in PSRAM, so they're **lost when the puck restarts**: resend when `hello.petIds` lacks ours. Encoder: `PetPack` in main.swift, a port of OpenHarness `cli/src/cable/pets/{sheet,convert,pack}.ts`; parser: firmware `pet_store.c`.
 - **There is no settings screen on the puck.** OpenHarness removed it; its "controls" list is fixed actions. The puck never changes a setting on its own, so `hello.settings` / `settings.state` are the truth and the Mac only sends changes. The finish beep is **muted by default** on a fresh puck.
-- **Settings tiles** are how settings change from the puck without custom firmware: extra agents (`puckbridge-settings-*`) after the chats, with how-to text sent as `summary {restore:true}`. On the Focus face a touch starts voice for the tile on screen, so a quick touch-touch (< 1.2 s of audio, or nothing heard) cycles the value, and a spoken value sets it. `focus` on a tile is ignored; `agent.open` on a tile counts as a tap. **Not yet tested on hardware.**
+- **The Settings tab** is how settings change from the puck without custom firmware: a puck tab (`settings`, last in the TABS carousel) whose rows are tiles (`puckbridge-settings-*`), with how-to text sent as `summary {restore:true}`. On the Focus face a touch starts voice for the tile on screen, so a quick touch-touch (< 1.2 s of audio, or nothing heard) cycles the value, and a spoken value sets it. `focus` on a tile is ignored; `agent.open` on a tile counts as a tap. **Not yet tested on hardware.**
 - No message sets the puck's clock; an idle clock face needs custom firmware.
 
 **Buttons (official firmware ≥0.0.88)**
 - **Large/top** (PWR key on the AXP2101 PMIC): tap toggles the screen. Long press is a **hardware restart in the PMIC and can't be changed**.
 - **Small/bottom** (GPIO0 = **BOOT**): tap cancels voice, or opens the STOP confirm when the focused tile is busy (confirming sends `turn.stop`), or goes home. Hold ≥800 ms toggles the screen. Holding BOOT while plugging in forces ROM download mode, which is the **recovery path for bad firmware**.
 - Button presses are handled entirely on-device. The host never sees them, except via `turn.stop`.
+
+**Tabs (`Bridge.buildTabs`).** Hold the face ≥650 ms → TABS carousel. Tab ids: `chats`, `code`, `p-<fnv64 of folder>`, `settings` (last). Switch handshake (firmware `workspace.c`): device sends `swarm.select` → host replies `swarms` with `selected` = that id → device sends `agents.refresh` → host streams `agents.begin`/`agent`×≤16/`agents.end {tab: <that id>}`. The device only lands when `agents.end.tab` matches; otherwise it shows "The tab did not open" after 8 s. Always answer `agents.refresh` with a full list, even if unchanged. Agent ids for Code sessions are `cc-<session uuid>`.
 
 ## Claude Desktop: the Accessibility contract
 
@@ -115,7 +118,7 @@ Bundle id `com.anthropic.claudefordesktop` (Electron). Set `AXManualAccessibilit
 - Sidebar status icons do **not** change while a normal chat generates. Idle/Done applies to tasks (Cowork/Dispatch/scheduled).
 - **Background finishes are invisible.** If the user switches away mid-reply, nothing in the UI changes when it completes, and Claude sent no macOS notification while in-app (untested with Claude unfocused, which is worth testing). The bridge only learns the outcome when the user returns to that chat.
 - **The puck's busy timer can't be set:** `turn.started` has no start-time field; the puck counts from when a tile goes idle → busy. Never send `turn.done` for a chat that may still be running, or the timer restarts at 0.
-- **Claude Code sessions** live under the Code tab and aren't in the Chat sidebar. They're intentionally not listed, since switching tabs behind the user is disruptive.
+- **Claude Code sessions** live under the Code tab and aren't in the Chat sidebar. We don't switch Claude's tabs behind the user; instead `CodeSessions` reads `~/.claude/projects/<folder>/<session>.jsonl` (first 64 KB: `cwd`, `summary`, first prompt). Unverified: whether Claude Desktop's Code tab stores its sessions there. Opening a Code session in Claude from the puck isn't implemented (needs the Code tab's AX tree).
 - **Project chats** are collapsed under project toggles, so only Recents show.
 
 **Finish detection (`Bridge.checkClaude`)**
@@ -130,7 +133,7 @@ Bundle id `com.anthropic.claudefordesktop` (Electron). Set `AXManualAccessibilit
 
 ## OpenHarness coexistence
 
-OpenHarness runs a launchd agent `ai.autonomous.harness.harnessd` (KeepAlive) that grabs the port with `O_EXLOCK`. The app stops it via `launchctl bootout gui/$UID/ai.autonomous.harness.harnessd` when the port is busy and `Take the puck from OpenHarness automatically` is on (default). The menu item **Restore OpenHarness service** re-bootstraps it from `~/Library/LaunchAgents/…plist` and turns auto-take off. **When OpenHarness connects, it auto-updates the puck's official firmware.** That matters once we ship custom firmware.
+OpenHarness runs a launchd agent `ai.autonomous.harness.harnessd` (KeepAlive) that grabs the port with `O_EXLOCK`. The app stops it via `launchctl bootout gui/$UID/ai.autonomous.harness.harnessd` when the port is busy and `Take the puck from OpenHarness automatically` is on (default). Settings → Advanced → **Lend the Puck to OpenHarness…** releases the port, re-bootstraps it from `~/Library/LaunchAgents/…plist` and turns auto-take off; **Take It Back** reverses that. **When OpenHarness connects, it auto-updates the puck's official firmware.** That matters once we ship custom firmware.
 
 ## Conventions
 
@@ -155,7 +158,7 @@ Before tagging a release, on a Mac with the puck and Claude Desktop:
 9. ◎ → Check for updates… on an older build finds and installs the release.
 10. Settings → Puck: moving brightness and toggling the beep change the puck, and the values survive unplug/replug.
 11. Settings → Character: each built-in shows on the puck; importing a petdex sheet uploads it (log: "Custom character stored"), and it comes back after the puck restarts.
-12. Settings tiles on the puck: stop on "Puck character", tap the face twice → next character; tap, say "Jolly", tap → Jolly. Same for beep/brightness/calm.
+12. Settings tab on the puck (hold the face → TABS → Settings): stop on "Puck character", tap the face twice → next character; tap, say "Jolly", tap → Jolly. Same for beep/brightness/calm.
 
 Good next step: add unit tests for the framing/CRC against the shared vectors in openharness `cli/src/cable/vectors/cable_frame.txt` (all 27 currently pass in a Python port).
 
@@ -167,6 +170,6 @@ Good next step: add unit tests for the framing/CRC against the shared vectors in
    - Report button gestures to the host instead of hard-coding them: e.g. `{"t":"button","id":"top|bottom","gesture":"tap|double|hold"}`, advertised via a `hello` capability like `buttons:"events-v1"`. Puck Bridge then maps gestures to actions from the menu (screen on/off, stop Claude, start voice, next/prev chat, open Claude). The top long-press stays a hardware restart.
    - An **idle clock + weather face**: the host sends e.g. `{"t":"ambient","time":<epoch>,"tz":"…","tempF":…,"cond":"…"}` every minute. Weather comes from Open-Meteo (free, no key) using a ZIP or coordinates set in the menu.
    - Release firmware through this repo's pipeline. Back up the full 16 MB flash (`esptool read_flash`) before the first flash. Keep OpenHarness's service off, or it will overwrite the firmware. First check secure boot is off (`esptool get_security_info`; the repo docs say Secure Boot v2 isn't enabled yet).
-4. **Settings tiles, hardware check:** confirm the touch-touch and spoken flows on a real puck, and what the puck shows after `voice.transcript` for a tile. If the flow is awkward, the custom-firmware button events below are the cleaner fix.
+4. **Settings tab, hardware check:** confirm the touch-touch and spoken flows on a real puck, and what the puck shows after `voice.transcript` for a tile. If the flow is awkward, the custom-firmware button events above are the cleaner fix.
 5. **Voice polish:** a review-before-send flow using the puck's draft UI (`voice.end {review:true}` → `voice.draft`). Optional slash-commands.
-6. Optionally list Claude Code sessions (only if it can be done without switching tabs visibly).
+6. Open Claude Code sessions (and send voice to them) from the puck. Needs a dump of Claude's Code tab AX tree from the user's Mac.

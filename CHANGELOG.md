@@ -10,15 +10,15 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - **Pick the puck's character:** Clawd (default), Codex Bot, Jolly or Fo, from Settings or the ◎ → Character menu.
 - **Your own character:** import a petdex-style sprite sheet (8 × 9 frames, PNG or WebP). Puck Bridge converts it to the puck's pack format and uploads it over the cable, and sends it again after the puck restarts.
 - **Puck settings from the Mac:** brightness, finish beep (the puck ships muted), calm mode, reverse scrolling and voice language. They're read from and saved on the puck itself.
-- **Settings tiles on the puck:** Character, Beep, Brightness and Calm mode appear after your chats. Tap the face twice to change one, or tap, say a value, and tap. They can be turned off in Settings → Character.
+- **Settings tab on the puck:** hold the face → TABS → **Settings** for Character, Beep, Brightness and Calm mode. Tap the face twice to change one, or tap, say a value, and tap. Can be turned off in Settings → Character.
 - Menu: Open Chat submenu, Character submenu, beep toggle, warning icon when Accessibility is missing, Open Claude when it isn't running.
 - Settings: Bring Claude to the front when a chat opens (on by default); hide the start of replies on the puck (privacy); Reconnect puck, Send test alert, Copy diagnostics.
 - `scripts/make-signing-cert.sh`: one paste in Terminal makes the signing certificate and walks you through adding it to GitHub, so macOS stops re-asking for permissions after every update. Settings → General shows whether the running app is signed.
 - `Build` workflow: compiles on every push and pull request (or Actions → Build → **Run workflow**), and checks generated character packs with the puck firmware's own parser (`tests/check_pet_pack.c`, `tests/make_test_sheet.py`).
-- `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
 ### Changed
 - Settings moved out of the ◎ menu into the Settings window. "Restore OpenHarness service" is now Settings → Advanced → **Lend the Puck to OpenHarness…**, with **Take It Back**.
-- The puck connects and shows its settings tiles even before Accessibility is allowed.
+- The puck connects (and shows its Settings tab) even before Accessibility is allowed. Before, it sat on the "Harness" screen until permission was granted.
+- "Puck tabs: show Claude Code sessions" moved to Settings → Claude & Voice.
 - Test builds from the Build workflow are signed too: with your certificate once it's set up, otherwise with a throwaway one that tests the signing path. Both workflows share `scripts/ci-import-cert.sh`.
 - Transcripts are no longer written to the log (only their word count).
 ### Fixed
@@ -26,7 +26,6 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - Clicking between chats could show "writing" on the puck when nothing was sent. The busy chat was guessed from the last one opened on the puck; it's now the chat on screen (found by its title in the conversation header), and the Stop button must be seen on two reads in a row. The log names the chat and button that triggered it.
 - The small button's Stop now stops the chat it was pressed for, opening it first if needed, instead of whatever chat is on screen.
 - The Build workflow's signature check always failed, and the Release workflow's signature warning always fired, because `codesign -dv` doesn't print Authority lines (`-dvv` does).
-- `scripts/*.sh` weren't executable in git, so the Release workflow failed at the build step ("Permission denied").
 - Restoring OpenHarness didn't hand the puck over: Puck Bridge reopened the port within a fraction of a second.
 - On replies longer than 25 seconds the puck stopped showing Claude as busy, so the character stopped working and the small button could no longer stop Claude. `turn.started` is now refreshed every 10 s.
 - The puck could hang waiting after a recording whose audio was lost (e.g. a reconnect mid-recording); it now always gets an answer.
@@ -36,6 +35,17 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - Alerts could open behind other windows.
 - An update that failed halfway could delete the app; the old copy is now kept until the new one is in place.
 - Puck I/O from voice and menu actions now runs on the bridge thread (fixes data races).
+
+## [0.4.0] - 2026-10-13
+### Added
+- **Puck tabs.** Hold on the puck's face to pick a tab: **Chats** (Claude Desktop recents), **Claude Code** (recent sessions), and one tab per Claude Code project folder. Uses the stock firmware's tab screen (`swarms` / `swarm.select`); up to 24 tabs of 16 rows. Code sessions are read from `~/.claude/projects` (folder + title only). Opening a Code session or speaking into one isn't supported yet; the puck says so. Menu: **Puck tabs: show Claude Code sessions**.
+- App icon ("Minimal ◎"): `Resources/AppIcon.svg` → `AppIcon.png`; `build.sh` turns it into `AppIcon.icns`.
+- Release notes now come from this file's section for the version.
+- Actions → Release → **Run workflow** can create a new version tag (on the chosen branch), so a release needs no git command.
+- `AGENTS.md` (agent/developer guide) and `CLAUDE.md` pointer for Claude Code.
+- `.github/workflows/build.yml` (compile check on every push), same file as on `matthew/keen-babbage-ipemc5`.
+### Fixed
+- Release build failed with "Permission denied": `scripts/*.sh` are now executable in git, and the workflow runs `bash scripts/build.sh` so older tags build too.
 - Release workflow: also builds when a release is published in the GitHub UI; a manual run (Actions → Release → Run workflow) builds the chosen tag instead of `main`; the self-signed certificate is trusted on the runner so CI signing actually takes effect (previously it would quietly fall back to ad-hoc); the signature is checked; uploads with `gh` instead of a third-party action.
 
 ## [0.3.0] - 2026-10-13
