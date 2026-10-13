@@ -107,7 +107,7 @@ func signingIdentity() -> String? {
 // MARK: Puck framing   A5 48 | ver | type | len16 | payload | crc16   (little-endian)
 // ============================================================================================
 let FRAME_VER: UInt8 = 1
-let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_PET: UInt8 = 0x05
+let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_LOG: UInt8 = 0x04, T_PET: UInt8 = 0x05
 let MAX_PAYLOAD = 8192
 
 func crc16(_ bytes: ArraySlice<UInt8>) -> UInt16 {
@@ -1733,6 +1733,8 @@ final class Bridge {
             sendMenu()
         case "pb.menu.tap":
             if let id = msg["id"] as? String { menuTap(id) }
+        case "pb.menu.set":
+            if let id = msg["id"] as? String, let i = msg["index"] as? Int { menuSet(id, index: i) }
         case "fw.accept":
             if let x = fwXfer { x.accepted = true; x.last = Date(); fwNote = "Installing… don't unplug the puck."; pumpFw(); publish() }
         case "fw.progress":
@@ -1766,24 +1768,93 @@ final class Bridge {
 
     // ---------- the puck's own Settings menu (Puck Bridge firmware) ----------
     // The firmware only draws rows and reports taps; each tap moves that setting to its next value here.
-    var menuItems: [(id: String, label: String, value: String)] {
-        var items: [(String, String, String)] = [("character", "Character", characterName(Pref.character))]
-        if let s = puckSettings {
-            items.append(("sound", "Sound", s.muted ? "Off" : soundName(Pref.soundStyle)))
-            items.append(("volume", "Volume", "\(Pref.soundVolume)%"))
-            items.append(("brightness", "Brightness", "\(s.brightness)%"))
-            items.append(("calm", "Calm mode", s.quiet ? "On" : "Off"))
+    // From firmware pb 2 a row can carry its choices: the puck shows them on a picker page (each character drawn as
+    // itself) and reports the one chosen (pb.menu.set).
+    struct MenuRow { let id: String; let label: String; let value: String; var choices: [(value: String, pet: String?, builtin: Bool)] = []; var index = 0 }
+
+    static let volumeSteps = [25, 50, 75, 100], brightnessSteps = [20, 40, 60, 80, 100], clockSteps = [0, 2, 5, 10, 15, 30]
+    static func nearest(_ list: [Int], _ v: Int) -> Int { list.indices.min { abs(list[$0] - v) < abs(list[$1] - v) } ?? 0 }
+    func clockName(_ m: Int) -> String { m == 0 ? "Never" : "\(m) min" }
+
+    var menuRows: [MenuRow] {
+        let chars = characterChoices
+        var character = MenuRow(id: "character", label: "Character", value: characterName(Pref.character))
+        character.choices = chars.prefix(16).map { id in
+            if !isLibrary(id) { return (characterName(id), id, true) }
+            // An imported character can only be drawn when it is the one on the puck (mapped to "claude").
+            let onPuck = custom?.libId == id && custom.map { petHeld.contains($0.id) } == true
+            return (characterName(id), onPuck ? "claude" : nil, false)
         }
-        items.append(("clock", "Clock after", Pref.idleMin == 0 ? "Never" : "\(Pref.idleMin) min"))
-        items.append(("clock24", "24-hour clock", Pref.clock24 ? "On" : "Off"))
-        items.append(("weather", "Weather", Pref.weatherOn ? "On" : "Off"))
-        return items
+        character.index = chars.firstIndex(of: Pref.character) ?? 0
+        var rows = [character]
+        if let s = puckSettings {
+            var sound = MenuRow(id: "sound", label: "Sound", value: s.muted ? "Off" : soundName(Pref.soundStyle))
+            sound.choices = [("Off", nil, false)] + SOUND_STYLES.map { ($0.name, nil, false) }
+            sound.index = s.muted ? 0 : (SOUND_STYLES.firstIndex { $0.id == Pref.soundStyle } ?? 0) + 1
+            var volume = MenuRow(id: "volume", label: "Volume", value: "\(Pref.soundVolume)%")
+            volume.choices = Bridge.volumeSteps.map { ("\($0)%", nil, false) }
+            volume.index = Bridge.nearest(Bridge.volumeSteps, Pref.soundVolume)
+            var bright = MenuRow(id: "brightness", label: "Brightness", value: "\(s.brightness)%")
+            bright.choices = Bridge.brightnessSteps.map { ("\($0)%", nil, false) }
+            bright.index = Bridge.nearest(Bridge.brightnessSteps, s.brightness)
+            rows += [sound, volume, bright, MenuRow(id: "calm", label: "Calm mode", value: s.quiet ? "On" : "Off")]
+        }
+        var clock = MenuRow(id: "clock", label: "Clock after", value: clockName(Pref.idleMin))
+        clock.choices = Bridge.clockSteps.map { (clockName($0), nil, false) }
+        clock.index = Bridge.nearest(Bridge.clockSteps, Pref.idleMin)
+        rows += [clock,
+                 MenuRow(id: "clock24", label: "24-hour clock", value: Pref.clock24 ? "On" : "Off"),
+                 MenuRow(id: "weather", label: "Weather", value: Pref.weatherOn ? "On" : "Off")]
+        return rows
     }
 
     func sendMenu() {
         guard greeted, pbFirmware >= 1 else { return }
-        send(["t": "pb.menu", "title": "Settings",
-              "items": menuItems.map { ["id": $0.id, "label": $0.label, "value": String($0.value.prefix(23))] }])
+        let pickers = pbFirmware >= 2
+        send(["t": "pb.menu", "title": "Settings", "items": menuRows.map { r -> [String: Any] in
+            var m: [String: Any] = ["id": r.id, "label": r.label, "value": String(r.value.prefix(23))]
+            if pickers && !r.choices.isEmpty {
+                m["index"] = r.index
+                m["choices"] = r.choices.map { c -> [String: Any] in
+                    var o: [String: Any] = ["value": String(c.value.prefix(23))]
+                    if let p = c.pet { o["pet"] = p; if c.builtin { o["builtin"] = true } }
+                    return o
+                }
+            }
+            return m
+        }])
+    }
+
+    /// A choice made on the puck's picker page.
+    func menuSet(_ id: String, index: Int) {
+        switch id {
+        case "character":
+            let chars = characterChoices
+            guard chars.indices.contains(index) else { break }
+            if Pref.character != chars[index] { Pref.character = chars[index]; characterChanged() }
+        case "sound":
+            guard puckSettings != nil, (0...SOUND_STYLES.count).contains(index) else { break }
+            if index == 0 { setPuckSettings(["muted": true]) }
+            else {
+                Pref.soundStyle = SOUND_STYLES[index - 1].id
+                if puckSettings?.muted == true { setPuckSettings(["muted": false]) }
+                sendSound(test: true)
+            }
+        case "volume":
+            guard Bridge.volumeSteps.indices.contains(index) else { break }
+            Pref.soundVolume = Bridge.volumeSteps[index]; sendSound(test: true)
+        case "brightness":
+            guard Bridge.brightnessSteps.indices.contains(index) else { break }
+            setPuckSettings(["brightness": Bridge.brightnessSteps[index]])
+        case "clock":
+            guard Bridge.clockSteps.indices.contains(index) else { break }
+            Pref.idleMin = Bridge.clockSteps[index]; nextAmbient = .distantPast
+        default:
+            break
+        }
+        say("Puck menu → \(id) #\(index)")
+        sendMenu()
+        publish()
     }
 
     func sendSound(test: Bool = false) {
@@ -2439,6 +2510,8 @@ final class Bridge {
                     for (type, payload) in decoder.feed(data) {
                         if type == T_PCM {
                             if voice != nil && voice!.pcm.count < 4_000_000 { voice!.pcm += payload }
+                        } else if type == T_LOG {
+                            puckLog(payload)
                         } else if type == T_JSON,
                                   let obj = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any] {
                             handle(obj)
@@ -2490,6 +2563,17 @@ final class Bridge {
             }
             tickClaude()
         }
+    }
+
+    /// The puck's own log lines (frame type 0x04) go into PuckBridge.log, at most 20 a second.
+    var puckLogWindow = (start: Date.distantPast, count: 0)
+    func puckLog(_ payload: [UInt8]) {
+        let now = Date()
+        if now.timeIntervalSince(puckLogWindow.start) >= 1 { puckLogWindow = (now, 0) }
+        puckLogWindow.count += 1
+        guard puckLogWindow.count <= 20 else { return }
+        let line = String(decoding: payload.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !line.isEmpty { say("puck: \(line)") }
     }
 
     func tickClaude() {
