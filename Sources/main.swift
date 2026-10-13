@@ -52,6 +52,9 @@ enum Pref {
         set { d.set(newValue, forKey: "clock24") }
     }
     static var weatherOn: Bool { get { bool("weatherOn", true) } set { d.set(newValue, forKey: "weatherOn") } }
+    /// Finish sound on Puck Bridge firmware (one of SOUND_STYLES) and its volume.
+    static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
+    static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -324,6 +327,31 @@ final class Claude {
     }
 
     func press(_ e: AXUIElement) { _ = AXUIElementPerformAction(e, kAXPressAction as CFString) }
+
+    /// Claude's window structure for support: roles, button labels and ids, never the conversation text.
+    func layoutDump() -> String {
+        guard let app = app else { return "Claude Desktop isn't running." }
+        var lines: [String] = [], n = 0
+        func walk(_ e: AXUIElement, _ d: Int) {
+            n += 1
+            if n > 6000 || d > 45 { return }
+            let r = role(e)
+            var desc = text(e, kAXDescriptionAttribute)
+            if desc.hasPrefix("Show message actions") { desc = "Show message actions…" }
+            let title = r == "AXStaticText" ? "" : text(e, kAXTitleAttribute)
+            let dom = text(e, "AXDOMIdentifier")
+            let selected = (attr(e, kAXSelectedAttribute) as? Bool) == true
+            var line = String(repeating: " ", count: d) + r
+            if !desc.isEmpty { line += " desc=\"\(desc.prefix(60))\"" }
+            if !title.isEmpty { line += " title=\"\(title.prefix(60))\"" }
+            if selected { line += " selected" }
+            if !dom.isEmpty { line += " id=\(dom)" }
+            lines.append(line)
+            for k in children(e) { walk(k, d + 1) }
+        }
+        walk(app, 0)
+        return lines.joined(separator: "\n")
+    }
 }
 
 // ============================================================================================
@@ -464,11 +492,134 @@ let BUILTIN_CHARACTERS: [PuckCharacter] = [
     PuckCharacter(id: "fo", name: "Fo", blurb: "A little pink ghost who runs errands.", symbol: "moon.stars",
                   aliases: ["fo", "foe", "faux", "pho", "ghost", "four"]),
 ]
-let CUSTOM_ID = "custom"
+/// Finish sounds Puck Bridge firmware can play (firmware/README.md).
+let SOUND_STYLES: [(id: String, name: String)] = [("chime", "Chime"), ("soft", "Soft"), ("bell", "Bell"), ("digital", "Digital")]
+func soundName(_ id: String) -> String { SOUND_STYLES.first { $0.id == id }?.name ?? "Chime" }
+
+let CUSTOM_ID = "custom"   // the old single "your own" slot; migrated into the library
+let LIB_PREFIX = "lib:"
+let libraryDir = supportDir.appendingPathComponent("Characters")
+func isLibrary(_ id: String) -> Bool { id.hasPrefix(LIB_PREFIX) }
 
 func characterName(_ id: String) -> String {
-    if id == CUSTOM_ID { return Pref.customName ?? "Your character" }
+    if let c = CharacterLibrary.shared.find(id) { return c.name }
     return BUILTIN_CHARACTERS.first { $0.id == id }?.name ?? "Clawd"
+}
+
+/// An imported character: libraryDir/<slug>/ holds its sprite sheet and character.json {name, sheet}.
+struct LibraryCharacter: Identifiable, Equatable { let id: String; let name: String; let sheet: URL; let dir: URL }
+
+/// The characters you've imported. They live on this Mac only (never in the app or the repo); the puck gets the
+/// chosen one as a pack over the cable.
+final class CharacterLibrary {
+    static let shared = CharacterLibrary()
+    private let lock = NSLock()
+    private var items: [LibraryCharacter] = []
+
+    var all: [LibraryCharacter] { lock.lock(); defer { lock.unlock() }; return items }
+    func find(_ id: String) -> LibraryCharacter? { all.first { $0.id == id } }
+
+    func reload() {
+        var out: [LibraryCharacter] = []
+        for dir in (try? FileManager.default.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil)) ?? [] {
+            guard let d = try? Data(contentsOf: dir.appendingPathComponent("character.json")),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let name = j["name"] as? String, let sheet = j["sheet"] as? String else { continue }
+            out.append(LibraryCharacter(id: LIB_PREFIX + dir.lastPathComponent, name: name, sheet: dir.appendingPathComponent(sheet), dir: dir))
+        }
+        out.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        lock.lock(); items = out; lock.unlock()
+    }
+
+    /// Names arrive with invisible characters sometimes (petdex's "Pikachu‌" has a zero-width joiner).
+    static func clean(_ name: String) -> String {
+        let kept = name.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0.properties.generalCategory != .format }
+        return String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines).prefix(22).description
+    }
+
+    /// Imports sprite sheets, petdex folders (pet.json + spritesheet), and .zip files of either, zips inside zips
+    /// included. Each one is converted once to check it fits the puck. Background thread.
+    func importItems(_ urls: [URL]) -> (added: [LibraryCharacter], errors: [String]) {
+        var found: [(name: String, data: Data, ext: String)] = []
+        var errors: [String] = []
+        let fm = FileManager.default
+        func scan(_ url: URL, _ depth: Int) {
+            guard depth < 5, !url.lastPathComponent.hasPrefix("."), url.lastPathComponent != "__MACOSX" else { return }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+            if isDir.boolValue {
+                if let d = try? Data(contentsOf: url.appendingPathComponent("pet.json")),
+                   let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                   let path = j["spritesheetPath"] as? String, let sheet = try? Data(contentsOf: url.appendingPathComponent(path)) {
+                    let name = (j["displayName"] as? String) ?? (j["id"] as? String) ?? url.lastPathComponent
+                    found.append((CharacterLibrary.clean(name), sheet, (path as NSString).pathExtension))
+                    return
+                }
+                for child in (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [] { scan(child, depth + 1) }
+            } else if url.pathExtension.lowercased() == "zip" {
+                let tmp = fm.temporaryDirectory.appendingPathComponent("puckbridge-import-\(UUID().uuidString)")
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                p.arguments = ["-x", "-k", url.path, tmp.path]
+                do { try p.run(); p.waitUntilExit() } catch { errors.append("\(url.lastPathComponent): couldn't unzip it"); return }
+                scan(tmp, depth + 1)
+                try? fm.removeItem(at: tmp)
+            } else if ["png", "webp", "gif", "jpg", "jpeg"].contains(url.pathExtension.lowercased()), depth == 0 || url.deletingPathExtension().lastPathComponent != "preview",
+                      let d = try? Data(contentsOf: url) {
+                let base = url.deletingPathExtension().lastPathComponent
+                let name = base == "spritesheet" ? url.deletingLastPathComponent().lastPathComponent : base
+                found.append((CharacterLibrary.clean(name.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized), d, url.pathExtension))
+            }
+        }
+        for u in urls { scan(u, 0) }
+
+        var added: [LibraryCharacter] = []
+        let existing = Set(all.compactMap { try? Data(contentsOf: $0.sheet) }.map { FirmwareImage.sha([UInt8]($0)) })
+        for f in found {
+            if existing.contains(FirmwareImage.sha([UInt8](f.data))) { continue }   // already in the library
+            do {
+                _ = try CustomCharacter.make(data: f.data, name: f.name)
+                var slug = f.name.lowercased().map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
+                if slug.isEmpty { slug = "character" }
+                var dir = libraryDir.appendingPathComponent(slug), n = 2
+                while fm.fileExists(atPath: dir.path) { dir = libraryDir.appendingPathComponent("\(slug)-\(n)"); n += 1 }
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                let sheetName = "spritesheet." + (f.ext.isEmpty ? "png" : f.ext.lowercased())
+                try f.data.write(to: dir.appendingPathComponent(sheetName))
+                let meta = try JSONSerialization.data(withJSONObject: ["name": f.name, "sheet": sheetName])
+                try meta.write(to: dir.appendingPathComponent("character.json"))
+                added.append(LibraryCharacter(id: LIB_PREFIX + dir.lastPathComponent, name: f.name, sheet: dir.appendingPathComponent(sheetName), dir: dir))
+            } catch {
+                errors.append("\(f.name): \(error.localizedDescription)")
+            }
+        }
+        if found.isEmpty && errors.isEmpty { errors.append("No sprite sheets found in what you chose.") }
+        reload()
+        return (added, errors)
+    }
+
+    func remove(_ id: String) {
+        if let c = find(id) { try? FileManager.default.removeItem(at: c.dir) }
+        reload()
+    }
+
+    /// The old single custom character (≤ v0.6) becomes a library entry.
+    func migrate() {
+        guard let name = Pref.customName, let data = try? Data(contentsOf: customSheetURL) else { return }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
+        try? data.write(to: tmp)
+        let added = importItems([tmp]).added
+        try? FileManager.default.removeItem(at: tmp)
+        if let c = added.first, Pref.character == CUSTOM_ID { Pref.character = c.id }
+        if !added.isEmpty || find(Pref.character) != nil { try? FileManager.default.removeItem(at: customSheetURL); Pref.customName = nil }
+    }
+
+    /// The first frame of a sheet, for the Settings window.
+    static func preview(_ url: URL) -> NSImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let cw = img.width / 8, ch = img.height / 9
+        return img.cropping(to: CGRect(x: 0, y: 0, width: cw, height: ch)).map { NSImage(cgImage: $0, size: NSSize(width: cw, height: ch)) }
+    }
 }
 
 /// Petdex sprite sheet (8 x 9 cells) -> the puck firmware's HPET pack. A port of OpenHarness
@@ -860,6 +1011,7 @@ final class CustomCharacter {
     let name: String
     let pet: PetPack.Pet
     let preview: NSImage?
+    var libId = ""
     private var packs: [Int: [UInt8]] = [:]
     private let lock = NSLock()
 
@@ -1260,6 +1412,7 @@ final class Bridge {
     var fwExpect = ""          // version we installed, confirmed by the next hello
     var nextAmbient = Date.distantPast
     var weather: WeatherService?
+    var inCodeTab = false
 
     var onSnapshot: ((Snapshot) -> Void)?
 
@@ -1359,7 +1512,7 @@ final class Bridge {
     func buildTabs() -> [PuckTab] {
         let chats = view.chats.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
-        let settings = Pref.puckTiles ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
+        let settings = Pref.puckTiles && pbFirmware < 1 ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
         guard Pref.codeTabs, !code.isEmpty else { return out + settings }
         func row(_ s: CodeSession) -> PuckItem { PuckItem(id: CODE_PREFIX + s.id, name: s.title, code: s) }
         out.append(PuckTab(id: "code", name: "Claude Code", items: code.prefix(MAX_ROWS).map(row)))
@@ -1463,6 +1616,7 @@ final class Bridge {
                 if claudeReadOnce || !axTrusted { tabs = buildTabs(); pushTabs(force: true); pushChats(force: true) }
                 send(["t": "notif.replace", "items": [Any]()])
                 nextAmbient = .distantPast
+                sendSound()
             } else {
                 pushChats()   // only if a tile's value changed
             }
@@ -1476,7 +1630,7 @@ final class Bridge {
             } else {
                 settingsNote = "Saved on the puck."
             }
-            if greeted { pushChats() }
+            if greeted { pushChats(); sendMenu() }
             publish()
         case "machines.list":
             send(["t": "machines.begin"])
@@ -1557,6 +1711,10 @@ final class Bridge {
             }
             say("Puck refused the custom character: \(reason)")
             publish()
+        case "pb.menu.open":
+            sendMenu()
+        case "pb.menu.tap":
+            if let id = msg["id"] as? String { menuTap(id) }
         case "fw.accept":
             if let x = fwXfer { x.accepted = true; x.last = Date(); fwNote = "Installing… don't unplug the puck."; pumpFw(); publish() }
         case "fw.progress":
@@ -1586,6 +1744,68 @@ final class Bridge {
         default:
             break
         }
+    }
+
+    // ---------- the puck's own Settings menu (Puck Bridge firmware) ----------
+    // The firmware only draws rows and reports taps; each tap moves that setting to its next value here.
+    var menuItems: [(id: String, label: String, value: String)] {
+        var items: [(String, String, String)] = [("character", "Character", characterName(Pref.character))]
+        if let s = puckSettings {
+            items.append(("sound", "Sound", s.muted ? "Off" : soundName(Pref.soundStyle)))
+            items.append(("volume", "Volume", "\(Pref.soundVolume)%"))
+            items.append(("brightness", "Brightness", "\(s.brightness)%"))
+            items.append(("calm", "Calm mode", s.quiet ? "On" : "Off"))
+        }
+        items.append(("clock", "Clock after", Pref.idleMin == 0 ? "Never" : "\(Pref.idleMin) min"))
+        items.append(("clock24", "24-hour clock", Pref.clock24 ? "On" : "Off"))
+        items.append(("weather", "Weather", Pref.weatherOn ? "On" : "Off"))
+        return items
+    }
+
+    func sendMenu() {
+        guard greeted, pbFirmware >= 1 else { return }
+        send(["t": "pb.menu", "title": "Settings",
+              "items": menuItems.map { ["id": $0.id, "label": $0.label, "value": String($0.value.prefix(23))] }])
+    }
+
+    func sendSound(test: Bool = false) {
+        guard greeted, pbFirmware >= 1 else { return }
+        send(["t": "pb.sound", "style": Pref.soundStyle, "volume": Pref.soundVolume, "test": test])
+    }
+
+    func menuTap(_ id: String) {
+        func next<T: Equatable>(_ list: [T], after v: T) -> T { list[((list.firstIndex(of: v) ?? -1) + 1) % list.count] }
+        switch id {
+        case "character":
+            let choices = characterChoices
+            if !choices.isEmpty { Pref.character = next(choices, after: Pref.character); characterChanged() }
+        case "sound":
+            // Off → Chime → Soft → Bell → Digital → Off
+            guard let s = puckSettings else { break }
+            let ids = SOUND_STYLES.map { $0.id }
+            if s.muted { Pref.soundStyle = ids[0]; setPuckSettings(["muted": false]); sendSound(test: true) }
+            else if Pref.soundStyle == ids.last { setPuckSettings(["muted": true]) }
+            else { Pref.soundStyle = next(ids, after: Pref.soundStyle); sendSound(test: true) }
+        case "volume":
+            Pref.soundVolume = next([25, 50, 75, 100], after: Pref.soundVolume); sendSound(test: true)
+        case "brightness":
+            if let s = puckSettings { setPuckSettings(["brightness": [20, 40, 60, 80, 100].first { $0 > s.brightness + 2 } ?? 20]) }
+        case "calm":
+            if let s = puckSettings { setPuckSettings(["quiet": !s.quiet]) }
+        case "clock":
+            Pref.idleMin = next([0, 2, 5, 10, 15, 30], after: Pref.idleMin); nextAmbient = .distantPast
+        case "clock24":
+            Pref.clock24.toggle(); nextAmbient = .distantPast
+        case "weather":
+            Pref.weatherOn.toggle()
+            DispatchQueue.main.async { self.weather?.refresh() }
+            nextAmbient = .distantPast
+        default:
+            break
+        }
+        say("Puck menu → \(id)")
+        sendMenu()
+        publish()
     }
 
     // ---------- firmware (over the cable, like OpenHarness does) ----------
@@ -1661,15 +1881,34 @@ final class Bridge {
     }
 
     func characterChanged() {
-        say("Character: \(characterName(Pref.character))")
+        let id = Pref.character
+        say("Character: \(characterName(id))")
         petNote = ""
+        if isLibrary(id), custom?.libId != id, let c = CharacterLibrary.shared.find(id) {
+            // Convert off the bridge thread, then send it.
+            petNote = "Getting \(c.name) ready…"
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data = try? Data(contentsOf: c.sheet), let cc = try? CustomCharacter.make(data: data, name: c.name) else {
+                    self.perform { $0.petNote = "Couldn't read \(c.name)'s sprite sheet."; $0.publish() }
+                    return
+                }
+                cc.libId = id
+                self.perform { b in
+                    guard Pref.character == id else { return }
+                    b.custom = cc; b.petFailed[cc.id] = nil; b.syncPets(); b.publish()
+                }
+            }
+        }
         syncPets()
-        if greeted { pushChats() }
+        if greeted { pushChats(); sendMenu() }
         publish()
     }
 
-    /// The characters the tile cycles through.
-    var characterChoices: [String] { BUILTIN_CHARACTERS.map { $0.id } + (custom != nil && petMax >= 1 ? [CUSTOM_ID] : []) }
+    /// The characters the puck can show: Fo only exists in newer firmware; imported ones need pet support.
+    var characterChoices: [String] {
+        BUILTIN_CHARACTERS.filter { $0.id != "fo" || pbFirmware >= 1 }.map { $0.id }
+            + (petMax >= 1 ? CharacterLibrary.shared.all.map { $0.id } : [])
+    }
 
     /// A tap (words == nil) or a spoken value on a settings tile. `turn` is the voice turn to answer, if any.
     func tileAct(_ tile: Tile, words: String?, turn: VoiceTurn?) {
@@ -1695,9 +1934,13 @@ final class Bridge {
             var next: String?
             if words != nil {
                 next = BUILTIN_CHARACTERS.first { c in c.aliases.contains { $0.contains(" ") ? heard.contains($0) : tokens.contains($0) } }?.id
-                if next == nil, choices.contains(CUSTOM_ID), !tokens.isDisjoint(with: ["custom", "mine", "own"]) { next = CUSTOM_ID }
-                if next == nil, choices.contains(CUSTOM_ID), let n = Pref.customName?.lowercased(), !n.isEmpty, heard.contains(n) { next = CUSTOM_ID }
-                if next == nil { answer("Say Clawd, Codex, Jolly or Fo", ok: false); return }
+                if next == nil {
+                    next = CharacterLibrary.shared.all.first { c in
+                        let n = c.name.lowercased()
+                        return heard.contains(n) || !tokens.isDisjoint(with: n.split(separator: " ").map(String.init).filter { $0.count > 2 })
+                    }?.id
+                }
+                guard let n = next, choices.contains(n) else { answer("Say a character's name, like Clawd", ok: false); return }
             } else {
                 let i = choices.firstIndex(of: Pref.character) ?? -1
                 next = choices[(i + 1) % choices.count]
@@ -1765,7 +2008,7 @@ final class Bridge {
     /// Tell the puck which pack draws for "claude" and send it the pack if it doesn't hold it.
     func syncPets() {
         guard greeted, petMax >= 1, fwXfer == nil else { return }
-        let want = Pref.character == CUSTOM_ID ? custom?.id : nil
+        let want = isLibrary(Pref.character) && custom?.libId == Pref.character ? custom?.id : nil
         let mapKey = want ?? "-"
         if mapKey != petMapSent {
             send(["t": "pet.map", "all": NSNull(), "engines": want.map { ["claude": $0] } ?? [String: String]()])
@@ -1939,6 +2182,23 @@ final class Bridge {
         var cur = claude.read()
         let first = !claudeReadOnce
         claudeReadOnce = true
+
+        // On Claude's Code tab the sidebar lists Claude Code sessions, not chats. Recognise them by their titles
+        // (the same ones ~/.claude/projects has) and keep the chat list from the Chat tab.
+        func norm(_ t: String) -> String {
+            String(t.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(40))
+        }
+        let codeTitles = code.map { norm($0.title) }.filter { $0.count >= 6 }
+        if !cur.chats.isEmpty && !codeTitles.isEmpty {
+            let hits = cur.chats.filter { c in
+                let t = norm(c.title)
+                return t.count >= 6 && codeTitles.contains { $0.hasPrefix(t) || t.hasPrefix($0) }
+            }.count
+            let codeTab = hits * 2 >= cur.chats.count
+            if codeTab != inCodeTab { say(codeTab ? "Claude is on its Code tab; keeping the chat list" : "Claude is back on its chats") }
+            inCodeTab = codeTab
+            if codeTab { cur.chats = prev.chats; cur.writing = false }
+        }
 
         if cur.chats.isEmpty && !prev.chats.isEmpty {
             emptyReads += 1
@@ -2302,7 +2562,8 @@ final class AppModel: ObservableObject {
     @Published var axTrusted = AXIsProcessTrusted()
     @Published var speech = SFSpeechRecognizer.authorizationStatus()
     @Published var loginStatus = SMAppService.mainApp.status
-    @Published var custom: CustomCharacter?
+    @Published var library: [LibraryCharacter] = []
+    @Published var libraryPreviews: [String: NSImage] = [:]
     @Published var customBusy = false
     @Published var customNote = ""
     @Published var updateVersion: String?
@@ -2321,7 +2582,14 @@ final class AppModel: ObservableObject {
         self.bridge = bridge
         self.updater = updater
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshPermissions() }
-        if let name = Pref.customName, let data = try? Data(contentsOf: customSheetURL) { loadCustom(data: data, name: name, save: false) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            CharacterLibrary.shared.migrate()
+            CharacterLibrary.shared.reload()
+            DispatchQueue.main.async {
+                self.reloadLibrary()
+                if isLibrary(Pref.character) { self.bridge.perform { $0.characterChanged() } }
+            }
+        }
     }
 
     func update(_ s: Snapshot) {
@@ -2351,59 +2619,53 @@ final class AppModel: ObservableObject {
         onChange?()
     }
 
-    var characterDetail: String {
-        if !snap.petsSupported && snap.puckConnected { return "This puck's firmware can't hold custom characters." }
-        return snap.character == CUSTOM_ID && !snap.petNote.isEmpty ? snap.petNote : "Your own sprite sheet"
+    func reloadLibrary() {
+        library = CharacterLibrary.shared.all
+        let missing = library.filter { libraryPreviews[$0.id] == nil }
+        guard !missing.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let images = missing.compactMap { c in CharacterLibrary.preview(c.sheet).map { (c.id, $0) } }
+            DispatchQueue.main.async { for (id, img) in images { self.libraryPreviews[id] = img } }
+        }
     }
 
-    func importCustom() {
+    func characterDetail(_ c: LibraryCharacter) -> String {
+        if !snap.petsSupported && snap.puckConnected { return "This puck's firmware can't hold imported characters." }
+        return snap.character == c.id && !snap.petNote.isEmpty ? snap.petNote : "Imported"
+    }
+
+    func importCharacters() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a petdex-style sprite sheet (8 × 9 frames, 1536 × 1872 pixels)"
+        panel.allowedContentTypes = [.zip, .image, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.message = "Choose petdex characters: sprite sheets, folders with pet.json, or .zip files (zips of zips are fine)"
         NSApp.activate()
-        guard panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) else { return }
-        let name = url.deletingPathExtension().lastPathComponent
-            .replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized
-        loadCustom(data: data, name: String(name.prefix(22)), save: true)
-    }
-
-    func loadCustom(data: Data, name: String, save: Bool) {
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        let urls = panel.urls
         customBusy = true
-        customNote = save ? "Converting…" : ""
+        customNote = "Importing…"
         DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let c = try CustomCharacter.make(data: data, name: name)
-                if save {
-                    try FileManager.default.createDirectory(at: supportDir, withIntermediateDirectories: true)
-                    try data.write(to: customSheetURL)
-                }
-                DispatchQueue.main.async {
-                    self.customBusy = false
-                    self.custom = c
-                    Pref.customName = c.name
-                    let kb = ((try? c.pack(2).count) ?? 0) / 1024
-                    self.customNote = save ? "Ready (\(kb) KB on the puck)." + (c.pet.warnings.isEmpty ? "" : " " + c.pet.warnings.joined(separator: " ")) : ""
-                    self.bridge.perform { b in b.custom = c; b.petFailed[c.id] = nil; b.syncPets(); b.pushChats(); b.publish() }
-                    if save { self.choose(CUSTOM_ID) }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.customBusy = false
-                    self.customNote = error.localizedDescription
-                    say("Custom character: \(error.localizedDescription)")
-                }
+            let r = CharacterLibrary.shared.importItems(urls)
+            DispatchQueue.main.async {
+                self.customBusy = false
+                self.reloadLibrary()
+                var note = r.added.isEmpty ? "Nothing new added." : "Added \(r.added.map { $0.name }.joined(separator: ", "))."
+                if !r.errors.isEmpty { note += " Skipped: " + r.errors.joined(separator: "; ") }
+                self.customNote = note
+                say("Characters: added \(r.added.count), skipped \(r.errors.count)")
+                if r.added.count == 1 { self.choose(r.added[0].id) }
+                self.bridge.perform { $0.sendMenu() }
             }
         }
     }
 
-    func removeCustom() {
-        try? FileManager.default.removeItem(at: customSheetURL)
-        Pref.customName = nil
-        custom = nil
-        customNote = ""
-        if snap.character == CUSTOM_ID { choose("claude") }
-        bridge.perform { b in b.custom = nil; b.syncPets(); b.pushChats(); b.publish() }
+    func removeCharacter(_ c: LibraryCharacter) {
+        CharacterLibrary.shared.remove(c.id)
+        libraryPreviews[c.id] = nil
+        reloadLibrary()
+        if snap.character == c.id { choose("claude") }
+        bridge.perform { b in if b.custom?.libId == c.id { b.custom = nil }; b.syncPets(); b.sendMenu(); b.publish() }
     }
 
     func refreshPuckList() { bridge.perform { b in if b.greeted { b.pushChats() } } }
@@ -2422,6 +2684,24 @@ final class AppModel: ObservableObject {
         else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!) }
     }
     func setWeather(_ on: Bool) { Pref.weatherOn = on; weather.refresh(); weatherChanged() }
+
+    func setSound(style: String? = nil, volume: Int? = nil, test: Bool = true) {
+        if let s = style { Pref.soundStyle = s }
+        if let v = volume { Pref.soundVolume = v }
+        objectWillChange.send()
+        bridge.perform { $0.sendSound(test: test); $0.sendMenu() }
+    }
+
+    func copyClaudeLayout() {
+        bridge.perform { b in
+            let dump = b.claude.layoutDump()
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(dump, forType: .string)
+                self.advancedNote = "Copied Claude's layout (\(dump.split(separator: "\n").count) lines, no message text). Paste it to whoever is helping you."
+            }
+        }
+    }
 
     func installFirmware() {
         guard let img = FirmwareImage.bundled else { return }
@@ -2792,24 +3072,28 @@ struct CharacterPane: View {
             }
             Section("Built in") {
                 ForEach(BUILTIN_CHARACTERS) { c in
-                    CharacterRow(symbol: c.symbol, name: c.name, detail: c.blurb, image: nil,
-                                 selected: model.snap.character == c.id) { model.choose(c.id) }
+                    let needsFirmware = c.id == "fo" && model.snap.puckConnected && model.snap.pbFirmware < 1
+                    CharacterRow(symbol: c.symbol, name: c.name,
+                                 detail: needsFirmware ? "Needs Puck Bridge firmware (Settings → Puck): the official firmware has no Fo." : c.blurb,
+                                 image: nil, selected: model.snap.character == c.id) { model.choose(c.id) }
+                        .disabled(needsFirmware)
                 }
             }
-            Section("Your own") {
-                if let custom = model.custom {
-                    CharacterRow(symbol: "person.crop.circle", name: custom.name, detail: model.characterDetail, image: custom.preview,
-                                 selected: model.snap.character == CUSTOM_ID) { model.choose(CUSTOM_ID) }
+            Section("Your characters") {
+                ForEach(model.library) { c in
                     HStack {
-                        Button("Replace…") { model.importCustom() }.disabled(model.customBusy)
-                        Button("Remove") { model.removeCustom() }.disabled(model.customBusy)
+                        CharacterRow(symbol: "person.crop.circle", name: c.name, detail: model.characterDetail(c), image: model.libraryPreviews[c.id],
+                                     selected: model.snap.character == c.id) { model.choose(c.id) }
+                        Button(role: .destructive) { model.removeCharacter(c) } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless).help("Remove \(c.name)")
                     }
-                } else {
-                    Button("Import a Sprite Sheet…") { model.importCustom() }.disabled(model.customBusy)
                 }
-                if model.customBusy { ProgressView().controlSize(.small) }
+                HStack {
+                    Button("Import Characters…") { model.importCharacters() }.disabled(model.customBusy)
+                    if model.customBusy { ProgressView().controlSize(.small) }
+                }
                 if !model.customNote.isEmpty { Text(model.customNote).font(.caption) }
-                Text("Use a petdex-style sheet: 8 × 9 frames, 1536 × 1872 (or 768 × 936) pixels, PNG or WebP. The puck keeps it in memory, so Puck Bridge sends it again after the puck restarts.")
+                Text("Choose petdex characters: sprite sheets (8 × 9 frames, 1536 × 1872 or 768 × 936, PNG or WebP), folders with a pet.json, or .zip files of them. They stay on this Mac; the puck gets the one you pick over the cable, again after each restart.")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Find characters on petdex.dev", destination: URL(string: "https://petdex.dev")!)
             }
@@ -2895,7 +3179,23 @@ struct PuckPane: View {
                     Toggle("Reverse scrolling", isOn: Binding(get: { s.scrollReversed }, set: { model.setPuck("scrollReversed", $0) }))
                 }
                 Section("Sound") {
-                    Toggle("Beep when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
+                    Toggle("Play a sound when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
+                    if model.snap.pbFirmware >= 1 {
+                        Picker("Sound", selection: Binding(get: { Pref.soundStyle }, set: { model.setSound(style: $0) })) {
+                            ForEach(SOUND_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
+                        }
+                        .disabled(s.muted)
+                        HStack {
+                            Slider(value: Binding(get: { Double(Pref.soundVolume) }, set: { Pref.soundVolume = Int($0); model.objectWillChange.send() }),
+                                   in: 10...100, step: 5,
+                                   label: { Text(verbatim: "Volume \(Pref.soundVolume)%") },
+                                   onEditingChanged: { editing in if !editing { model.setSound() } })
+                            Button("Test") { model.setSound() }
+                        }
+                        .disabled(s.muted)
+                    } else {
+                        Text("Puck Bridge firmware (below) adds a choice of sounds and a volume control.").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("Voice") {
                     Picker("Language you speak to the puck", selection: Binding(get: { s.voiceLang }, set: { model.setPuck("voiceLang", $0) })) {
@@ -2989,6 +3289,8 @@ struct AdvancedPane: View {
                 HStack {
                     Button("Open Log") { NSWorkspace.shared.open(logURL) }
                     Button("Copy Diagnostics") { model.copyDiagnostics() }
+                    Button("Copy Claude Layout") { model.copyClaudeLayout() }
+                        .help("Claude's window structure (buttons and roles, no message text), for fixing chat detection")
                 }
                 if !model.advancedNote.isEmpty { Text(model.advancedNote).font(.caption).foregroundStyle(.secondary) }
             }
@@ -3082,8 +3384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let characters = NSMenu()
-        var choices = BUILTIN_CHARACTERS.map { ($0.id, $0.name) }
-        if let c = model.custom { choices.append((CUSTOM_ID, c.name)) }
+        var choices = BUILTIN_CHARACTERS.filter { $0.id != "fo" || s.pbFirmware >= 1 || !s.puckConnected }.map { ($0.id, $0.name) }
+        choices += model.library.map { ($0.id, $0.name) }
         for (id, name) in choices {
             let i = add(name, #selector(chooseCharacter(_:)))
             i.representedObject = id
@@ -3091,7 +3393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             characters.addItem(i)
         }
         characters.addItem(.separator())
-        characters.addItem(add(model.custom == nil ? "Use Your Own…" : "Change Your Own…", #selector(openCharacter)))
+        characters.addItem(add("Import Characters…", #selector(openCharacter)))
         let charParent = NSMenuItem(title: "Character: \(characterName(s.character))", action: nil, keyEquivalent: "")
         charParent.submenu = characters
         menu.addItem(charParent)

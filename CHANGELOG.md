@@ -10,6 +10,15 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - **Clock + weather face** (needs Puck Bridge firmware): shows after 5 minutes idle (Settings → Puck → Clock face: Never/2/5/10/15/30 min, 24-hour clock, weather on/off). Weather comes from Open-Meteo using this Mac's location (Location Services; only a rounded location is sent).
 - **Small button = home** (needs Puck Bridge firmware): tap → clock face; hold while Claude writes → stop; hold otherwise → screen off/on.
 - Location row in Settings → General → Permissions.
+- **Character library:** Settings → Character → **Import Characters…** takes petdex sprite sheets, folders with a pet.json, and .zip files of them (zips inside zips too), so a whole bundle imports at once. They stay on this Mac (never in the app or the repo); pick one and the puck gets it over the cable. Remove with the trash button. The old single "your own" character moves into the library.
+- **On-device Settings menu** (Puck Bridge firmware): the clock face's Settings button opens Character, Sound, Volume, Brightness, Calm mode, Clock after, 24-hour clock and Weather; tap a row to change it. The Mac app does the changing, so both stay in sync.
+- **Finish sounds** (Puck Bridge firmware): Chime, Soft, Bell or Digital, plus volume, in Settings → Puck → Sound (with Test) and in the puck's menu.
+- Settings → Advanced → **Copy Claude Layout**: Claude's window structure (no message text), for fixing chat detection.
+### Fixed
+- Chats and Claude Code sessions got mixed: on Claude's Code tab the sidebar lists Code sessions, which were read as chats. Puck Bridge now recognises them (by their titles in `~/.claude/projects`) and keeps the chat list.
+- **Fo showed nothing:** the official firmware (0.0.88) has no Fo. Fo is now offered only on Puck Bridge firmware, which has it.
+### Changed
+- With Puck Bridge firmware the puck's own Settings menu replaces the Settings tab of tiles.
 
 ## [0.6.0] - 2026-10-13
 ### Added
