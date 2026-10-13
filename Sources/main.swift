@@ -22,6 +22,8 @@ import ServiceManagement
 import Security
 import ImageIO
 import UniformTypeIdentifiers
+import CoreLocation
+import CryptoKit
 
 // ============================================================================================
 // MARK: Settings + log
@@ -43,6 +45,13 @@ enum Pref {
     static var character: String { get { d.string(forKey: "character") ?? "claude" } set { d.set(newValue, forKey: "character") } }
     static var betaAccess: Bool { get { bool("betaAccess", false) } set { d.set(newValue, forKey: "betaAccess") } }
     static var customName: String? { get { d.string(forKey: "customName") } set { d.set(newValue, forKey: "customName") } }
+    // Clock face (Puck Bridge firmware only)
+    static var idleMin: Int { get { d.object(forKey: "idleMin") as? Int ?? 5 } set { d.set(newValue, forKey: "idleMin") } }
+    static var clock24: Bool {
+        get { d.object(forKey: "clock24") as? Bool ?? !(DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "h").contains("a") }
+        set { d.set(newValue, forKey: "clock24") }
+    }
+    static var weatherOn: Bool { get { bool("weatherOn", true) } set { d.set(newValue, forKey: "weatherOn") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -95,7 +104,7 @@ func signingIdentity() -> String? {
 // MARK: Puck framing   A5 48 | ver | type | len16 | payload | crc16   (little-endian)
 // ============================================================================================
 let FRAME_VER: UInt8 = 1
-let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_PET: UInt8 = 0x05
+let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_PET: UInt8 = 0x05
 let MAX_PAYLOAD = 8192
 
 func crc16(_ bytes: ArraySlice<UInt8>) -> UInt16 {
@@ -904,6 +913,174 @@ final class CustomCharacter {
 }
 
 // ============================================================================================
+// MARK: Weather (for the puck's clock face)
+// ============================================================================================
+// The Mac's location (Location Services) → Open-Meteo (free, no key). Only the rounded latitude/longitude leave
+// the Mac, and only to api.open-meteo.com. Refreshed every 30 minutes.
+struct WeatherNow { let temp: String; let cond: String; let hilo: String; let at: Date }
+
+final class WeatherService: NSObject, CLLocationManagerDelegate {
+    private let lm = CLLocationManager()
+    private var location: CLLocation?
+    private var current: WeatherNow?
+    private let lock = NSLock()
+    var onChange: (() -> Void)?
+    private(set) var note = ""
+
+    var status: CLAuthorizationStatus { lm.authorizationStatus }
+    var allowed: Bool { status == .authorizedAlways || status == .authorized }
+
+    /// What the clock face shows; nil when off, unknown or more than 3 hours old.
+    func snapshot() -> WeatherNow? {
+        lock.lock(); defer { lock.unlock() }
+        guard Pref.weatherOn, let c = current, Date().timeIntervalSince(c.at) < 3 * 3600 else { return nil }
+        return c
+    }
+
+    func start() {
+        lm.delegate = self
+        lm.desiredAccuracy = kCLLocationAccuracyKilometer
+        refresh()
+        Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+
+    /// Main thread. Asks for permission the first time.
+    func refresh() {
+        guard Pref.weatherOn else { setNote(""); return }
+        switch status {
+        case .notDetermined: lm.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorized: lm.requestLocation()
+        default: setNote("Location is off for Puck Bridge, so the clock shows no weather.")
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if allowed { manager.requestLocation() }
+        onChange?()
+    }
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let l = locations.last else { return }
+        location = l
+        fetch(l)
+    }
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        say("Weather: couldn't get the Mac's location (\(error.localizedDescription))")
+        if let l = location { fetch(l) }   // the last known place is fine for weather
+    }
+
+    private func setNote(_ n: String) { note = n; onChange?() }
+
+    private func fetch(_ l: CLLocation) {
+        let f = Locale.current.measurementSystem == .us
+        let lat = String(format: "%.2f", l.coordinate.latitude), lon = String(format: "%.2f", l.coordinate.longitude)
+        let q = "latitude=\(lat)&longitude=\(lon)&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min"
+            + "&timezone=auto&forecast_days=1" + (f ? "&temperature_unit=fahrenheit" : "")
+        guard let url = URL(string: "https://api.open-meteo.com/v1/forecast?" + q) else { return }
+        URLSession.shared.dataTask(with: url) { data, _, err in
+            guard let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cur = j["current"] as? [String: Any], let t = (cur["temperature_2m"] as? NSNumber)?.doubleValue else {
+                say("Weather: couldn't load (\(err?.localizedDescription ?? "bad response"))")
+                DispatchQueue.main.async { self.setNote("Couldn't load the weather just now.") }
+                return
+            }
+            let code = (cur["weather_code"] as? NSNumber)?.intValue ?? -1
+            let daily = j["daily"] as? [String: Any]
+            let hi = ((daily?["temperature_2m_max"] as? [NSNumber])?.first)?.doubleValue
+            let lo = ((daily?["temperature_2m_min"] as? [NSNumber])?.first)?.doubleValue
+            func deg(_ v: Double) -> String { "\(Int(v.rounded()))°" }
+            let w = WeatherNow(temp: deg(t), cond: WeatherService.describe(code),
+                               hilo: hi != nil && lo != nil ? "H \(deg(hi!))  L \(deg(lo!))" : "", at: Date())
+            self.lock.lock(); self.current = w; self.lock.unlock()
+            DispatchQueue.main.async { self.setNote("") }
+        }.resume()
+    }
+
+    /// WMO weather interpretation codes (Open-Meteo).
+    static func describe(_ c: Int) -> String {
+        switch c {
+        case 0: return "Clear"
+        case 1: return "Mostly clear"
+        case 2: return "Partly cloudy"
+        case 3: return "Cloudy"
+        case 45, 48: return "Fog"
+        case 51, 53, 55: return "Drizzle"
+        case 56, 57: return "Freezing drizzle"
+        case 61: return "Light rain"
+        case 63: return "Rain"
+        case 65: return "Heavy rain"
+        case 66, 67: return "Freezing rain"
+        case 71: return "Light snow"
+        case 73: return "Snow"
+        case 75: return "Heavy snow"
+        case 77: return "Snow grains"
+        case 80, 81: return "Showers"
+        case 82: return "Heavy showers"
+        case 85, 86: return "Snow showers"
+        case 95: return "Thunderstorm"
+        case 96, 99: return "Storm with hail"
+        default: return ""
+        }
+    }
+}
+
+// ============================================================================================
+// MARK: Puck firmware (installed over the cable)
+// ============================================================================================
+// Puck Bridge's own firmware (the official firmware + firmware/patches: clock face, home button) is built by CI
+// and bundled in the app. The official firmware can always be put back: Autonomous publishes it openly.
+struct FirmwareImage {
+    let version: String
+    let data: [UInt8]
+    let sha256: String
+    let label: String
+
+    static func sha(_ d: [UInt8]) -> String { SHA256.hash(data: Data(d)).map { String(format: "%02x", $0) }.joined() }
+
+    /// The firmware bundled in this build of the app, if any (checked against its own manifest).
+    static let bundled: FirmwareImage? = {
+        guard let j = Bundle.main.url(forResource: "PuckFirmware", withExtension: "json"),
+              let b = Bundle.main.url(forResource: "PuckFirmware", withExtension: "bin"),
+              let meta = (try? JSONSerialization.jsonObject(with: Data(contentsOf: j))) as? [String: Any],
+              let version = meta["version"] as? String, let sum = meta["sha256"] as? String,
+              let bytes = try? Data(contentsOf: b) else { return nil }
+        let data = [UInt8](bytes)
+        guard sha(data) == sum.lowercased() else { say("Bundled puck firmware failed its checksum; ignoring it"); return nil }
+        return FirmwareImage(version: version, data: data, sha256: sum.lowercased(), label: "Puck Bridge firmware \(version)")
+    }()
+
+    static let officialManifest = URL(string: "https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json")!
+
+    /// Downloads the official round-puck firmware Autonomous publishes, verifying size and SHA-256.
+    static func official(_ done: @escaping (Result<FirmwareImage, Error>) -> Void) {
+        URLSession.shared.dataTask(with: officialManifest) { data, _, err in
+            guard let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let c = j["commander"] as? [String: Any], let version = c["version"] as? String,
+                  let urlS = c["url"] as? String, let url = URL(string: urlS), let sum = c["sha256"] as? String,
+                  let size = (c["size"] as? NSNumber)?.intValue else {
+                done(.failure(SimpleError("Couldn't read Autonomous's firmware list (\(err?.localizedDescription ?? "bad response")).")))
+                return
+            }
+            URLSession.shared.dataTask(with: url) { bin, _, err in
+                guard let bin = bin else { done(.failure(SimpleError(err?.localizedDescription ?? "Download failed"))); return }
+                let bytes = [UInt8](bin)
+                guard bytes.count == size, sha(bytes) == sum.lowercased() else {
+                    done(.failure(SimpleError("The official firmware download didn't match its checksum."))); return
+                }
+                done(.success(FirmwareImage(version: version, data: bytes, sha256: sum.lowercased(), label: "official firmware \(version)")))
+            }.resume()
+        }.resume()
+    }
+}
+
+final class FwTransfer {
+    let image: FirmwareImage
+    var offset = 0, acked = 0
+    var accepted = false
+    var last = Date()
+    init(_ image: FirmwareImage) { self.image = image }
+}
+
+// ============================================================================================
 // MARK: Bridge
 // ============================================================================================
 let MACHINE_ID = "puck-bridge"
@@ -975,6 +1152,10 @@ struct Snapshot {
     var petsSupported = false
     var petNote = ""
     var character = Pref.character
+    var pbFirmware = 0          // the puck runs Puck Bridge firmware (hello "pb")
+    var isPro = false
+    var fwNote = ""
+    var fwBusy = false
 }
 
 /// Settings tiles: the rows of the puck's Settings tab, so settings can be changed on the puck itself.
@@ -1071,6 +1252,15 @@ final class Bridge {
     var petMapSent = ""
     var petNote = ""
 
+    // firmware + clock face
+    var pbFirmware = 0
+    var board = ""
+    var fwXfer: FwTransfer?
+    var fwNote = ""
+    var fwExpect = ""          // version we installed, confirmed by the next hello
+    var nextAmbient = Date.distantPast
+    var weather: WeatherService?
+
     var onSnapshot: ((Snapshot) -> Void)?
 
     // ---------- work from other threads runs here, on the bridge thread ----------
@@ -1100,6 +1290,10 @@ final class Bridge {
         s.settingsNote = settingsNote
         s.petsSupported = petMax >= 1
         s.petNote = petNote
+        s.pbFirmware = s.puckConnected ? pbFirmware : 0
+        s.isPro = board == "pro"
+        s.fwNote = fwNote
+        s.fwBusy = fwXfer != nil
         s.character = Pref.character
         DispatchQueue.main.async { self.onSnapshot?(s) }
     }
@@ -1118,6 +1312,8 @@ final class Bridge {
         if port != nil { say("Puck disconnected (\(why))") }
         port = nil; greeted = false; pushedKey = ""; pushedTabsKey = ""; voice = nil; decoder.reset()
         petXfer = nil; petMapSent = ""; puckSettings = nil; settingsNote = ""
+        if fwXfer != nil { fwXfer = nil; fwNote = "The puck disconnected during the install. It keeps its current firmware; try again." }
+        pbFirmware = 0
     }
     func dropPuck(_ why: String) { sendLock.lock(); dropPuckLocked(why); sendLock.unlock(); publish() }
 
@@ -1251,6 +1447,13 @@ final class Bridge {
                   "features": ["agents.refresh", "settings"]])
             fw = msg["fw"] as? String ?? "?"
             hw = msg["hw"] as? String ?? ""
+            board = msg["board"] as? String ?? ""
+            pbFirmware = msg["pb"] as? Int ?? 0
+            if !fwExpect.isEmpty && !greeted {
+                fwNote = fw == fwExpect ? "\(fwExpect) is installed and running." : "The puck restarted on \(fw), not \(fwExpect): it kept its previous firmware."
+                say("Firmware: puck now runs \(fw)")
+                fwExpect = ""
+            }
             if let d = msg["settings"] as? [String: Any], let s = PuckSettings(d) { puckSettings = s }
             readPetHello(msg)
             if !greeted {
@@ -1259,6 +1462,7 @@ final class Bridge {
                 say("Puck connected (firmware \(fw)\(petMax >= 1 ? ", custom characters supported" : ""))")
                 if claudeReadOnce || !axTrusted { tabs = buildTabs(); pushTabs(force: true); pushChats(force: true) }
                 send(["t": "notif.replace", "items": [Any]()])
+                nextAmbient = .distantPast
             } else {
                 pushChats()   // only if a tile's value changed
             }
@@ -1353,9 +1557,79 @@ final class Bridge {
             }
             say("Puck refused the custom character: \(reason)")
             publish()
+        case "fw.accept":
+            if let x = fwXfer { x.accepted = true; x.last = Date(); fwNote = "Installing… don't unplug the puck."; pumpFw(); publish() }
+        case "fw.progress":
+            if let x = fwXfer {
+                x.acked = msg["written"] as? Int ?? x.acked
+                x.last = Date()
+                let note = "Installing… \(x.image.data.isEmpty ? 100 : x.acked * 100 / x.image.data.count)% (don't unplug the puck)"
+                if note != fwNote { fwNote = note; publish() }
+                pumpFw()
+            }
+        case "fw.done":
+            if let x = fwXfer {
+                say("Firmware: \(x.image.version) written and verified; the puck is restarting")
+                fwExpect = x.image.version
+                fwXfer = nil
+                fwNote = "Installed. The puck is restarting…"
+                publish()
+            }
+        case "fw.error":
+            let m = msg["message"] as? String ?? "no reason given"
+            if fwXfer != nil {
+                fwXfer = nil
+                fwNote = "The puck didn't take the firmware (\(m)). It's still on \(fw)."
+                say("Firmware: refused (\(m))")
+                syncPets(); publish()
+            }
         default:
             break
         }
+    }
+
+    // ---------- firmware (over the cable, like OpenHarness does) ----------
+    func offerFirmware(_ img: FirmwareImage) {
+        guard greeted else { fwNote = "Connect the puck first."; publish(); return }
+        guard board != "pro" else { fwNote = "This firmware is for the round puck."; publish(); return }
+        guard fwXfer == nil, petXfer == nil else { fwNote = "Another transfer is running; try again in a moment."; publish(); return }
+        fwXfer = FwTransfer(img)
+        fwNote = "Offering \(img.label) to the puck…"
+        say("Firmware: offering \(img.version) (\(img.data.count) bytes)")
+        send(["t": "fw.offer", "version": img.version, "size": img.data.count, "sha256": img.sha256])
+        publish()
+    }
+
+    /// Same flow control as character packs: ≤ 8 KB frames, ≤ 16 KB ahead of the puck's acks.
+    private func pumpFw() {
+        guard let x = fwXfer, x.accepted else { return }
+        while x.offset < x.image.data.count && x.offset - x.acked < 16 * 1024 && port != nil {
+            let end = min(x.offset + 8192, x.image.data.count)
+            let slice = Array(x.image.data[x.offset..<end])
+            x.offset = end
+            sendFrame(T_FW, slice)
+        }
+    }
+
+    // ---------- clock face ----------
+    /// Pre-formatted strings for the Puck Bridge firmware's clock face; sent each minute.
+    func sendAmbient() {
+        let now = Date()
+        let f = DateFormatter()
+        f.locale = .current
+        var time = "", ampm = ""
+        if Pref.clock24 {
+            f.dateFormat = "HH:mm"; time = f.string(from: now)
+        } else {
+            f.dateFormat = "h:mm"; time = f.string(from: now)
+            f.dateFormat = "a"; ampm = f.string(from: now)
+        }
+        f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
+        let w = weather?.snapshot()
+        send(["t": "ambient", "time": time, "ampm": ampm, "date": f.string(from: now),
+              "temp": w?.temp ?? "", "cond": w?.cond ?? "", "hilo": w?.hilo ?? "", "idleMin": Pref.idleMin])
+        let cal = Calendar.current
+        nextAmbient = cal.date(byAdding: .minute, value: 1, to: cal.dateInterval(of: .minute, for: now)?.start ?? now) ?? now.addingTimeInterval(60)
     }
 
     func openChat(_ id: String, why: String) {
@@ -1490,7 +1764,7 @@ final class Bridge {
 
     /// Tell the puck which pack draws for "claude" and send it the pack if it doesn't hold it.
     func syncPets() {
-        guard greeted, petMax >= 1 else { return }
+        guard greeted, petMax >= 1, fwXfer == nil else { return }
         let want = Pref.character == CUSTOM_ID ? custom?.id : nil
         let mapKey = want ?? "-"
         if mapKey != petMapSent {
@@ -1832,6 +2106,14 @@ final class Bridge {
                 let v = claude.read()
                 if let stop = v.stopButton { say("Puck → stop Claude"); claude.press(stop) } else { toast("Claude isn't writing") }
             }
+            if greeted && pbFirmware >= 1 && now >= nextAmbient { sendAmbient() }
+            if let x = fwXfer, now.timeIntervalSince(x.last) > (x.accepted ? 20 : 30) {
+                fwXfer = nil
+                fwNote = x.accepted ? "The install stalled. The puck keeps its current firmware; try again."
+                                    : "The puck didn't accept the firmware (it says no while you're talking to it). Try again in a moment."
+                say("Firmware: \(x.accepted ? "transfer stalled" : "offer not accepted")")
+                syncPets(); publish()
+            }
             if let x = petXfer, now.timeIntervalSince(x.last) > 10 {
                 send(["t": "pet.drop", "id": x.id])
                 petXfer = nil; petFailed[x.id] = "stalled"
@@ -2030,6 +2312,8 @@ final class AppModel: ObservableObject {
     @Published var updateNote = ""
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
+    @Published var weatherNote = ""
+    let weather = WeatherService()
     let signedAs = signingIdentity()
     var onChange: (() -> Void)?
 
@@ -2123,6 +2407,56 @@ final class AppModel: ObservableObject {
     }
 
     func refreshPuckList() { bridge.perform { b in if b.greeted { b.pushChats() } } }
+
+    // ---------- clock face + firmware ----------
+    var locationAllowed: Bool { weather.allowed }
+    func weatherChanged() {
+        weatherNote = weather.note
+        objectWillChange.send()
+        clockChanged()
+    }
+    /// Re-send the clock strings now (a setting or the weather changed).
+    func clockChanged() { bridge.perform { $0.nextAmbient = .distantPast } }
+    func allowLocation() {
+        if weather.status == .notDetermined { weather.refresh() }
+        else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!) }
+    }
+    func setWeather(_ on: Bool) { Pref.weatherOn = on; weather.refresh(); weatherChanged() }
+
+    func installFirmware() {
+        guard let img = FirmwareImage.bundled else { return }
+        let a = NSAlert()
+        a.messageText = "Install Puck Bridge firmware \(img.version) on the puck?"
+        a.informativeText = """
+            Adds a clock and weather face when the puck is idle, and makes the small button a home button \
+            (tap: clock · hold while Claude writes: stop · hold otherwise: screen off/on).
+
+            It takes about a minute over the cable. Keep the puck plugged in until it restarts. The puck keeps its \
+            previous firmware as a fallback, and Settings → Puck → Restore Official Firmware puts Autonomous's \
+            firmware back. (OpenHarness also reinstalls official firmware if it ever connects.)
+            """
+        a.addButton(withTitle: "Install"); a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        bridge.perform { $0.offerFirmware(img) }
+    }
+    func restoreOfficialFirmware() {
+        let a = NSAlert()
+        a.messageText = "Put the official firmware back on the puck?"
+        a.informativeText = "Puck Bridge downloads Autonomous's current firmware for the round puck, checks it, and installs it over the cable. The clock face and home button go away."
+        a.addButton(withTitle: "Restore"); a.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        snap.fwNote = "Downloading the official firmware…"
+        FirmwareImage.official { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let img): self.bridge.perform { $0.offerFirmware(img) }
+                case .failure(let e): self.snap.fwNote = ""; self.alert("Couldn't get the official firmware", e.localizedDescription)
+                }
+            }
+        }
+    }
     func refreshCode() { bridge.perform { b in b.lastCodeRead = .distantPast } }
 
     // ---------- puck settings ----------
@@ -2265,7 +2599,8 @@ final class AppModel: ObservableObject {
         let ps = s.puckSettings.map { "brightness \($0.brightness), beep \($0.muted ? "off" : "on"), calm \($0.quiet), scroll reversed \($0.scrollReversed), voice \($0.voiceLang)" } ?? "not reported"
         let lines = [
             "Puck Bridge v\(versionLine) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
-            s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)"),
+            s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)") + (s.pbFirmware >= 1 ? " · Puck Bridge firmware" : "")
+                + " · bundled firmware: \(FirmwareImage.bundled?.version ?? "none")",
             "Puck settings: \(ps)",
             "Character: \(characterName(s.character)) (\(s.character))\(s.petsSupported ? "" : " · custom characters not supported")\(s.petNote.isEmpty ? "" : " · \(s.petNote)")",
             s.claude,
@@ -2333,6 +2668,10 @@ struct GeneralPane: View {
                               granted: model.axTrusted, action: model.openAccessibility)
                 PermissionRow(title: "Speech Recognition", detail: "Turns what you say into the puck into text, on this Mac.",
                               granted: model.speech == .authorized, action: model.fixSpeech)
+                if Pref.weatherOn {
+                    PermissionRow(title: "Location", detail: "For the weather on the puck's clock face. Only a rounded location goes to Open-Meteo.",
+                                  granted: model.locationAllowed, action: model.allowLocation)
+                }
                 if !model.axTrusted {
                     Text("Already switched on in System Settings? After an update macOS can keep a stale entry. Select Puck Bridge in the list, remove it with −, then add it again with +.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -2485,6 +2824,62 @@ struct CharacterPane: View {
     }
 }
 
+struct FirmwareSection: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        let s = model.snap
+        Section("Firmware") {
+            if let img = FirmwareImage.bundled {
+                if s.pbFirmware >= 1 && s.fw == img.version {
+                    Text("Puck Bridge firmware \(img.version) is on the puck: the clock face and home button are on.")
+                } else {
+                    HStack {
+                        Text(s.pbFirmware >= 1 ? "A newer Puck Bridge firmware is available (\(img.version))." : "Puck Bridge firmware \(img.version)")
+                        Spacer()
+                        Button(s.pbFirmware >= 1 ? "Update…" : "Install…") { model.installFirmware() }
+                            .disabled(!s.puckConnected || s.fwBusy || s.isPro)
+                    }
+                    Text("Adds a clock and weather face when the puck is idle, and makes the small button a home button: tap for the clock, hold while Claude writes to stop it, hold otherwise to turn the screen off or on.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("This build of Puck Bridge doesn't include puck firmware.").foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Official firmware from Autonomous").foregroundStyle(.secondary)
+                Spacer()
+                Button("Restore…") { model.restoreOfficialFirmware() }.disabled(!s.puckConnected || s.fwBusy || s.isPro)
+            }
+            if !s.fwNote.isEmpty { Text(s.fwNote).font(.caption) }
+        }
+    }
+}
+
+struct ClockSection: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        Section("Clock face") {
+            if model.snap.puckConnected && model.snap.pbFirmware < 1 {
+                Text("Needs Puck Bridge firmware (above).").font(.caption).foregroundStyle(.secondary)
+            }
+            Picker("Show the clock when idle for", selection: Binding(get: { Pref.idleMin }, set: { Pref.idleMin = $0; model.clockChanged(); model.objectWillChange.send() })) {
+                Text("Never (small button only)").tag(0)
+                ForEach([2, 5, 10, 15, 30], id: \.self) { m in Text("\(m) minutes").tag(m) }
+            }
+            Toggle("24-hour clock", isOn: Binding(get: { Pref.clock24 }, set: { Pref.clock24 = $0; model.clockChanged(); model.objectWillChange.send() }))
+            Toggle("Show the weather (uses this Mac's location)", isOn: Binding(get: { Pref.weatherOn }, set: { model.setWeather($0); model.objectWillChange.send() }))
+            if Pref.weatherOn && !model.locationAllowed {
+                HStack {
+                    Text("Location isn't allowed yet.").font(.caption)
+                    Spacer()
+                    Button("Allow…") { model.allowLocation() }
+                }
+            }
+            if !model.weatherNote.isEmpty { Text(model.weatherNote).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 struct PuckPane: View {
     @ObservedObject var model: AppModel
     var body: some View {
@@ -2519,6 +2914,8 @@ struct PuckPane: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            FirmwareSection(model: model)
+            ClockSection(model: model)
             Section("About this puck") {
                 LabeledContent("Firmware", value: model.snap.fw.isEmpty ? "—" : model.snap.fw)
                 LabeledContent("Hardware", value: model.snap.hw.isEmpty ? "—" : model.snap.hw)
@@ -2641,6 +3038,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.showSettings(.general) }
         }
         Transcriber.authorize { _ in }
+
+        bridge.weather = model.weather
+        model.weather.onChange = { [weak self] in self?.model.weatherChanged() }
+        model.weather.start()
 
         Thread.detachNewThread { [bridge] in bridge.run() }
 

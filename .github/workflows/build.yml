@@ -22,10 +22,37 @@ env:
   OPENHARNESS_SHA: ce68e2fac27b8523c145f79d9d22f2ad7e589aad
 
 jobs:
+  # The puck firmware the app bundles (upstream OpenHarness firmware + firmware/patches), built on Linux with
+  # Docker and cached until the patches, the upstream commit or the script change.
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: firmware/out
+          key: puck-firmware-${{ hashFiles('firmware/UPSTREAM', 'firmware/patches/**', 'scripts/build-firmware.sh') }}
+      - name: Build the puck firmware
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/build-firmware.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: puck-firmware
+          path: firmware/out
+          if-no-files-found: ignore
+          retention-days: 7
+
   build:
+    needs: firmware
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # no firmware patches → no firmware artifact
+        with:
+          name: puck-firmware
+          path: firmware/out
 
       - name: Version (a preview is <latest release>.<build number>, e.g. 0.4.0.57)
         env:

@@ -15,6 +15,10 @@
 	<key>PBUpdateRepo</key><string></string>
 	<key>PBChannel</key><string></string>
 	<key>PBCommit</key><string></string>
+	<key>NSLocationUsageDescription</key>
+	<string>Puck Bridge shows the local weather on the puck's clock face. Only a rounded location is sent, to Open-Meteo.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Puck Bridge shows the local weather on the puck's clock face. Only a rounded location is sent, to Open-Meteo.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Puck Bridge turns what you say into the puck into text for Claude, on this Mac.</string>
 </dict>
