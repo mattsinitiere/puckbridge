@@ -6,7 +6,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-10-13
+## [0.6.0] - 2026-10-13
 ### Added
 - **Settings window** (◎ → Settings…, ⌘,) with General, Character, Puck, Claude & Voice and Advanced tabs. It shows live status and a permissions checklist, and opens by itself on first launch if Accessibility isn't allowed yet.
 - **Pick the puck's character:** Clawd (default), Codex Bot, Jolly or Fo, from Settings or the ◎ → Character menu.
