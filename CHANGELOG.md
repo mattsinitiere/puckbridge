@@ -13,7 +13,16 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - Code sessions carry their project name to the puck (shown small on Puck Bridge firmware).
 - The startup chat choice no longer takes the puck off its clock (`focus` with `keepClock`).
 ### Fixed
-- **The wrong chat showing as working:** when Claude starts writing, Puck Bridge now matches the conversation's own title more carefully (the row text may be cut short or carry a status like "#5 · Merged"), and when it can't tell which chat it is, it marks none instead of guessing the top row. The log says why it picked the chat it did.
+- **Startup on the clock, also when Claude is read late:** Puck Bridge reads Claude before it sends the puck its first chat list, and once the puck's clock is up it no longer sends the startup chat choice to firmware that would leave the clock for it. The puck's first tab matches the view Claude is showing.
+- Switching tabs on the puck while Claude is writing no longer flips Claude's view (that hid the reply, so its finish was never seen and the chat stayed "working" for 20 minutes).
+- The puck's small-button Stop only presses Stop when the chat on screen is the one you asked to stop.
+- Opening a chat or Code session from the Mac's menu moves the puck to the matching tab.
+- Timer state can't go stale ("0:00 left" after a missed end); the puck's menu updates when a timer starts, ends or is cancelled.
+- The puck's character picker always includes the current character (it holds 16), and a choice is matched by name if the list changed meanwhile.
+- Two Code sessions with the same title in one project get separate ids; opening by title also checks the project.
+- Code sessions are no longer marked working from their sidebar status until the words Claude uses are confirmed (only logged); a misread status could have kept a spinner going forever.
+- A character removed on another Mac is moved to "Removed Characters" in Puck Bridge's support folder instead of being deleted (a different iCloud account looks the same).
+- **The wrong chat showing as working:** when Claude starts writing, Puck Bridge now matches the conversation's own title more carefully (the row text may be cut short or carry a status like "#5 · Merged"), and when it can't tell which chat it is, it marks none instead of guessing the top row. When the conversation has a title, nothing else (text on screen that happens to equal another chat's name) decides. A row that just appeared counts as the new chat only at the top of its list. The log says why it picked the chat it did.
 
 ## [0.8.1] - 2026-10-14
 ### Added
