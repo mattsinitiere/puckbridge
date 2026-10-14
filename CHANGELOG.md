@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+### Added
+- **Timers** (Puck Bridge firmware pb.4): Settings → Timer on the puck (1 min to 1 hour, or cancel), or the Timer buttons in Settings → Puck on the Mac. The puck counts down by itself, shows it on the clock, and rings at the end until you touch it.
+- **Hear the sounds before choosing them:** on the puck's Sound and Volume pickers, each choice plays when you stop on it.
+### Changed
+- **Tabs are a switch between your chats and Claude Code:** holding the puck's face now offers exactly two tabs, Chats and Claude Code (every Code session, all projects). Choosing one also switches Claude's sidebar to that view, and switching Claude's view on the Mac moves the puck to the matching tab.
+- Code sessions carry their project name to the puck (shown small on Puck Bridge firmware).
+- The startup chat choice no longer takes the puck off its clock (`focus` with `keepClock`).
+### Fixed
+- **The wrong chat showing as working:** when Claude starts writing, Puck Bridge now matches the conversation's own title more carefully (the row text may be cut short or carry a status like "#5 · Merged"), and when it can't tell which chat it is, it marks none instead of guessing the top row. The log says why it picked the chat it did.
 
 ## [0.8.1] - 2026-10-14
 ### Added

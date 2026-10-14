@@ -1396,6 +1396,7 @@ struct Snapshot {
     var isPro = false
     var fwNote = ""
     var fwBusy = false
+    var timerEnd: Date?
 }
 
 /// Settings tiles: the rows of the puck's Settings tab, so settings can be changed on the puck itself.
@@ -1531,6 +1532,7 @@ final class Bridge {
         s.released = released
         s.writing = view.writing
         s.fw = fw; s.hw = hw
+        s.timerEnd = timerEnd
         s.chats = chatRows.map { ChatItem(id: $0.id, title: $0.title) }
         for c in codeRows {
             let p = c.project ?? "Code", item = ChatItem(id: c.id, title: c.title)
@@ -3622,6 +3624,22 @@ struct PuckPane: View {
                         .disabled(s.muted)
                     } else {
                         Text("Puck Bridge firmware (below) adds a choice of sounds and a volume control.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.snap.pbFirmware >= 3 {
+                    Section("Timer") {
+                        HStack {
+                            ForEach([1, 5, 10, 25, 60], id: \.self) { m in
+                                Button(m == 60 ? "1 h" : "\(m) min") { model.bridge.perform { $0.startTimer(minutes: m) } }
+                            }
+                            Spacer()
+                            if let end = model.snap.timerEnd {
+                                Text(timerInterval: Date()...max(Date(), end), countsDown: true).monospacedDigit()
+                                Button("Cancel") { model.bridge.perform { $0.cancelTimer() } }
+                            }
+                        }
+                        Text("The puck counts down by itself (also while this Mac sleeps) and rings at the end. You can also start one on the puck: Settings → Timer.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Section("Voice") {
