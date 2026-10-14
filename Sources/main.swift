@@ -107,7 +107,7 @@ func signingIdentity() -> String? {
 // MARK: Puck framing   A5 48 | ver | type | len16 | payload | crc16   (little-endian)
 // ============================================================================================
 let FRAME_VER: UInt8 = 1
-let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_PET: UInt8 = 0x05
+let T_JSON: UInt8 = 0x01, T_PCM: UInt8 = 0x02, T_FW: UInt8 = 0x03, T_LOG: UInt8 = 0x04, T_PET: UInt8 = 0x05
 let MAX_PAYLOAD = 8192
 
 func crc16(_ bytes: ArraySlice<UInt8>) -> UInt16 {
@@ -230,10 +230,35 @@ func size(_ e: AXUIElement) -> CGSize? {
     return AXValueGetValue(v as! AXValue, .cgSize, &s) ? s : nil
 }
 
-struct Chat { let id: String; let title: String; let element: AXUIElement }
+/// FNV-1a 64, hex: short stable ids from names (tab ids, Code session ids).
+func fnv64(_ s: String) -> String {
+    var h: UInt64 = 0xcbf29ce484222325
+    for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
+    return String(h, radix: 16)
+}
+
+/// Which list Claude's sidebar shows: the Mode switch at its top ("Chat and Cowork" / "Code").
+enum ClaudeMode: String { case chat, code, unknown }
+
+/// A sidebar row. On Chat mode a chat (id = its status icon's AXDOMIdentifier); on Code mode a Claude Code session,
+/// listed under its project (id = CODE_PREFIX + hash of project and title, so it survives Claude re-drawing the list).
+/// `element` is nil for rows remembered from the other mode, or from the last run.
+struct Chat {
+    let id: String
+    let title: String
+    let element: AXUIElement?
+    var project: String? = nil
+    var status = ""
+    var isCode: Bool { project != nil }
+}
+let CODE_PREFIX = "cc-"
+func codeId(project: String, title: String) -> String { CODE_PREFIX + fnv64(project + "\n" + title) }
 
 struct ClaudeView {
-    var chats: [Chat] = []
+    var mode = ClaudeMode.unknown
+    var modeButtons: [ClaudeMode: AXUIElement] = [:]
+    var openTitle = ""          // the open conversation, from its web area's title ("<title> - Claude Code")
+    var chats: [Chat] = []      // the rows the sidebar shows now (chats, or Code sessions)
     var writing = false
     var messageLabels: Set<String> = []
     var lastReply = ""
@@ -270,36 +295,60 @@ final class Claude {
         var replies: [String] = []
         var texts: [(String, CGFloat)] = []
         var sidebarRight: CGFloat = 0
+        var titleMode = ClaudeMode.unknown
 
-        func row(_ button: AXUIElement) -> Chat? {
-            var id = "", title = ""
+        /// A row button: its status icon (id + description) and its title text.
+        func row(_ button: AXUIElement) -> (dom: String, status: String, title: String)? {
+            var id = "", status = "", title = ""
             func look(_ e: AXUIElement, _ d: Int) {
                 if d > 5 { return }
                 for k in children(e) {
                     let r = role(k)
-                    if r == "AXImage", id.isEmpty { id = text(k, "AXDOMIdentifier") }
+                    if r == "AXImage", id.isEmpty { id = text(k, "AXDOMIdentifier"); status = text(k, kAXDescriptionAttribute) }
                     if r == "AXStaticText", title.isEmpty { title = text(k, kAXValueAttribute) }
                     look(k, d + 1)
                 }
             }
             look(button, 0)
-            return (!id.isEmpty && !title.isEmpty) ? Chat(id: id, title: title, element: button) : nil
+            return (!id.isEmpty && !title.isEmpty) ? (id, status, title) : nil
         }
 
-        func walk(_ e: AXUIElement, _ d: Int, _ inRow: Bool) {
+        var rows: [(e: AXUIElement, dom: String, status: String, title: String, project: String?)] = []
+        func walk(_ e: AXUIElement, _ d: Int, _ inRow: Bool, _ project: String?) {
             seen += 1
             if seen > 30000 || d > 90 { return }
             var inside = inRow
+            var project = project
             let r0 = role(e)
-            if r0 == "AXStaticText", !inRow {
+            let kids = children(e)
+            switch r0 {
+            case "AXStaticText" where !inRow:
                 let t = text(e, kAXValueAttribute).trimmingCharacters(in: .whitespacesAndNewlines)
                 if t.count > 1, let p = point(e) { texts.append((t, p.x)) }
-            }
-            if r0 == "AXTextArea", text(e, kAXDescriptionAttribute).lowercased().contains("prompt") {
-                v.composer = e
-                v.composerText = text(e, kAXValueAttribute)
-            }
-            if r0 == "AXButton" {
+            case "AXTextArea":
+                if text(e, kAXDescriptionAttribute).lowercased().contains("prompt") {
+                    v.composer = e
+                    v.composerText = text(e, kAXValueAttribute)
+                }
+            case "AXWebArea":
+                let t = text(e, kAXTitleAttribute)
+                if let r = t.range(of: " - Claude Code", options: [.anchored, .backwards]) { v.openTitle = String(t[..<r.lowerBound]); titleMode = .code }
+                else if let r = t.range(of: " - Claude", options: [.anchored, .backwards]) { v.openTitle = String(t[..<r.lowerBound]); titleMode = .chat }
+            case "AXRadioButton":
+                // The Mode switch: "Chat and Cowork…" / "Code". The selected one has value 1.
+                let label = text(e, kAXDescriptionAttribute)
+                let m: ClaudeMode = label.hasPrefix("Code") ? .code : label.hasPrefix("Chat") ? .chat : .unknown
+                if m != .unknown {
+                    v.modeButtons[m] = e
+                    if (attr(e, kAXValueAttribute) as? NSNumber)?.intValue == 1 { v.mode = m }
+                }
+            case "AXGroup":
+                // A Code project in the sidebar: a group holding "<name>" and "New session in <name>".
+                for k in kids where role(k) == "AXButton" {
+                    let label = text(k, kAXDescriptionAttribute)
+                    if label.hasPrefix("New session in ") { project = String(label.dropFirst("New session in ".count)); break }
+                }
+            case "AXButton":
                 let label = text(e, kAXDescriptionAttribute)
                 if label == "Stop" || label.hasPrefix("Stop ") { v.writing = true; v.stopButton = e; v.stopLabel = label }
                 if label == "Send" { v.sendButton = e }
@@ -308,13 +357,23 @@ final class Claude {
                     if let r = label.range(of: "Claude responded: ") { replies.append(String(label[r.upperBound...])) }
                 }
                 if !inRow, let c = row(e) {
-                    v.chats.append(c); inside = true
+                    rows.append((e, c.dom, c.status, c.title, project)); inside = true
                     if let p = point(e), let s = size(e) { sidebarRight = max(sidebarRight, p.x + s.width) }
                 }
+            default:
+                break
             }
-            for k in children(e) { walk(k, d + 1, inside) }
+            for k in kids { walk(k, d + 1, inside, project) }
         }
-        walk(app, 0, false)
+        walk(app, 0, false, nil)
+        if v.mode == .unknown { v.mode = titleMode }
+        if v.mode == .unknown && rows.contains(where: { $0.project != nil }) { v.mode = .code }
+        v.chats = rows.map { r in
+            // On Code mode every row is a session; one outside any project group goes under "Code".
+            let project = r.project ?? (v.mode == .code ? "Code" : nil)
+            guard let p = project else { return Chat(id: r.dom, title: r.title, element: r.e, status: r.status) }
+            return Chat(id: codeId(project: p, title: r.title), title: r.title, element: r.e, project: p, status: r.status)
+        }
         v.lastReply = replies.last ?? ""
         v.mainTexts = texts.filter { $0.1 > sidebarRight + 8 }.map { $0.0 }
         return v
@@ -322,8 +381,18 @@ final class Claude {
 
     func open(_ chat: Chat, bringForward: Bool) {
         if bringForward { running?.activate() }
-        let r = AXUIElementPerformAction(chat.element, kAXPressAction as CFString)
+        guard let e = chat.element else { say("Couldn't open \"\(chat.title)\": it isn't on screen"); return }
+        let r = AXUIElementPerformAction(e, kAXPressAction as CFString)
         if r != .success { say("Couldn't open \"\(chat.title)\" (AX error \(r.rawValue))") }
+    }
+
+    /// Switch the sidebar between chats and Code sessions (the Mode switch at its top).
+    @discardableResult
+    func show(_ mode: ClaudeMode, in v: ClaudeView) -> Bool {
+        guard v.mode != mode else { return true }
+        guard let b = v.modeButtons[mode] else { say("Couldn't find Claude's \(mode == .code ? "Code" : "Chat") switch"); return false }
+        say("Claude → \(mode == .code ? "Code" : "Chat") sessions")
+        return AXUIElementPerformAction(b, kAXPressAction as CFString) == .success
     }
 
     func press(_ e: AXUIElement) { _ = AXUIElementPerformAction(e, kAXPressAction as CFString) }
@@ -341,6 +410,7 @@ final class Claude {
             let title = r == "AXStaticText" ? "" : text(e, kAXTitleAttribute)
             let dom = text(e, "AXDOMIdentifier")
             let selected = (attr(e, kAXSelectedAttribute) as? Bool) == true
+                || (r == "AXRadioButton" && (attr(e, kAXValueAttribute) as? NSNumber)?.intValue == 1)
             var line = String(repeating: " ", count: d) + r
             if !desc.isEmpty { line += " desc=\"\(desc.prefix(60))\"" }
             if !title.isEmpty { line += " title=\"\(title.prefix(60))\"" }
@@ -351,66 +421,6 @@ final class Claude {
         }
         walk(app, 0)
         return lines.joined(separator: "\n")
-    }
-}
-
-// ============================================================================================
-// MARK: Claude Code sessions (read-only, from ~/.claude/projects)
-// ============================================================================================
-// Claude Code keeps one JSONL transcript per session in ~/.claude/projects/<folder>/<session id>.jsonl.
-// We read only the first few KB of each (working folder + title) and never log what's in them.
-struct CodeSession { let id: String; let title: String; let project: String; let cwd: String; let modified: Date }
-
-final class CodeSessions {
-    static let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
-    private var cache: [String: (modified: Date, session: CodeSession?)] = [:]
-
-    /// Sessions touched in the last `days`, newest first.
-    func recent(days: Double = 30) -> [CodeSession] {
-        let fm = FileManager.default
-        let cutoff = Date().addingTimeInterval(-days * 86400)
-        var out: [CodeSession] = []
-        var alive = Set<String>()
-        for dir in (try? fm.contentsOfDirectory(at: Self.root, includingPropertiesForKeys: nil)) ?? [] {
-            let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            for f in files where f.pathExtension == "jsonl" && !f.lastPathComponent.hasPrefix("agent-") {
-                guard let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-                      m > cutoff else { continue }
-                alive.insert(f.path)
-                if let c = cache[f.path], c.modified == m { if let s = c.session { out.append(s) }; continue }
-                let s = Self.parse(f, modified: m)
-                cache[f.path] = (m, s)
-                if let s = s { out.append(s) }
-            }
-        }
-        cache = cache.filter { alive.contains($0.key) }
-        return out.sorted { $0.modified > $1.modified }
-    }
-
-    private static func parse(_ url: URL, modified: Date) -> CodeSession? {
-        guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? h.close() }
-        let head = (try? h.read(upToCount: 64 * 1024)) ?? Data()
-        var cwd = "", summary = "", prompt = ""
-        for line in head.split(separator: UInt8(ascii: "\n")) {
-            guard let o = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
-            if cwd.isEmpty, let c = o["cwd"] as? String { cwd = c }
-            let type = o["type"] as? String
-            if type == "summary", let s = o["summary"] as? String { summary = s }
-            if type == "user", prompt.isEmpty, (o["isMeta"] as? Bool) != true, (o["isSidechain"] as? Bool) != true,
-               let m = o["message"] as? [String: Any] {
-                var t = m["content"] as? String ?? ""
-                if t.isEmpty, let parts = m["content"] as? [[String: Any]] {
-                    t = parts.first(where: { $0["type"] as? String == "text" })?["text"] as? String ?? ""
-                }
-                t = t.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !t.isEmpty && !t.hasPrefix("<") && !t.hasPrefix("Caveat:") { prompt = t }
-            }
-        }
-        let title = (summary.isEmpty ? prompt : summary).replacingOccurrences(of: "\n", with: " ")
-        guard !cwd.isEmpty, !title.isEmpty else { return nil }
-        return CodeSession(id: url.deletingPathExtension().lastPathComponent, title: String(title.prefix(80)),
-                           project: (cwd as NSString).lastPathComponent, cwd: cwd, modified: modified)
     }
 }
 
@@ -1092,15 +1102,15 @@ final class WeatherService: NSObject, CLLocationManagerDelegate {
     func start() {
         lm.delegate = self
         lm.desiredAccuracy = kCLLocationAccuracyKilometer
-        refresh()
+        refresh(ask: false)   // the Setup window asks, one permission at a time
         Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
     /// Main thread. Asks for permission the first time.
-    func refresh() {
+    func refresh(ask: Bool = true) {
         guard Pref.weatherOn else { setNote(""); return }
         switch status {
-        case .notDetermined: lm.requestWhenInUseAuthorization()
+        case .notDetermined: if ask { lm.requestWhenInUseAuthorization() }
         case .authorizedAlways, .authorized: lm.requestLocation()
         default: setNote("Location is off for Puck Bridge, so the clock shows no weather.")
         }
@@ -1241,11 +1251,10 @@ let MACHINE_NAME = Host.current().localizedName ?? "Mac"
 struct VoiceTurn { var upload: String; var agentId: String?; var rate: Double; var lang: String; var pcm: [UInt8] }
 
 /// One row on the puck: a Claude Desktop chat or a Claude Code session.
-struct PuckItem { let id: String; let name: String; var chat: Chat? = nil; var code: CodeSession? = nil; var tile: Tile? = nil }
+struct PuckItem { let id: String; let name: String; var chat: Chat? = nil; var tile: Tile? = nil }
 /// One puck tab ("swarm" in the protocol). The firmware allows 24 tabs of 16 rows each.
 struct PuckTab { let id: String; let name: String; let items: [PuckItem] }
 let MAX_TABS = 24, MAX_ROWS = 16
-let CODE_PREFIX = "cc-"
 
 /// Cut to the firmware's name buffer (39 bytes) without splitting a character.
 func fit(_ s: String, bytes: Int = 39) -> String {
@@ -1254,11 +1263,7 @@ func fit(_ s: String, bytes: Int = 39) -> String {
     return out
 }
 /// Short stable id for a project folder (FNV-1a), so tab ids stay well under the firmware's 47 bytes.
-func tabId(forFolder path: String) -> String {
-    var h: UInt64 = 0xcbf29ce484222325
-    for b in path.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
-    return "p-" + String(h, radix: 16)
-}
+func tabId(forProject name: String) -> String { "p-" + fnv64(name) }
 
 /// What the puck reports in every `hello` and `settings.state`. It stores these itself (NVS), so it is the source of truth.
 struct PuckSettings: Equatable {
@@ -1299,6 +1304,7 @@ struct Snapshot {
     var fw = ""
     var hw = ""
     var chats: [ChatItem] = []
+    var code: [(project: String, items: [ChatItem])] = []
     var puckSettings: PuckSettings?
     var settingsNote = ""
     var petsSupported = false
@@ -1361,9 +1367,11 @@ final class Bridge {
     var hw = ""
     var view = ClaudeView()
     var pushedKey = ""
-    let codeSessions = CodeSessions()
-    var code: [CodeSession] = []
-    var lastCodeRead = Date.distantPast
+    // Claude's sidebar shows chats or Code sessions, never both: each list is kept from when it was last on screen.
+    var chatRows: [Chat] = []
+    var codeRows: [Chat] = Bridge.loadCodeRows()
+    var codeStatuses: Set<String> = []   // the Code status words seen so far (logged once each, to learn them)
+    var pendingOpen: (id: String, title: String, at: Date, why: String)?
     var tabs: [PuckTab] = []
     var pushedTabsKey = ""
     var tabSwitchedAt = Date.distantPast
@@ -1412,7 +1420,6 @@ final class Bridge {
     var fwExpect = ""          // version we installed, confirmed by the next hello
     var nextAmbient = Date.distantPast
     var weather: WeatherService?
-    var inCodeTab = false
 
     var onSnapshot: ((Snapshot) -> Void)?
 
@@ -1433,12 +1440,16 @@ final class Bridge {
         s.claudeRunning = claude.app != nil
         s.claude = !axTrusted ? "Claude: needs Accessibility permission"
                  : claude.app == nil ? "Claude: not running"
-                 : "Claude: \(view.chats.count) chats\(Pref.codeTabs ? " · \(code.count) Code sessions" : "")\(view.writing ? " · writing…" : "")"
+                 : "Claude: \(chatRows.count) chats\(Pref.codeTabs ? " · \(codeRows.count) Code sessions" : "")\(view.writing ? " · writing…" : "")"
         s.axTrusted = axTrusted
         s.released = released
         s.writing = view.writing
         s.fw = fw; s.hw = hw
-        s.chats = view.chats.map { ChatItem(id: $0.id, title: $0.title) }
+        s.chats = chatRows.map { ChatItem(id: $0.id, title: $0.title) }
+        for c in codeRows {
+            let p = c.project ?? "Code", item = ChatItem(id: c.id, title: c.title)
+            if let i = s.code.firstIndex(where: { $0.project == p }) { s.code[i].items.append(item) } else { s.code.append((p, [item])) }
+        }
         s.puckSettings = s.puckConnected ? puckSettings : nil
         s.settingsNote = settingsNote
         s.petsSupported = petMax >= 1
@@ -1508,28 +1519,35 @@ final class Bridge {
     }
 
     // ---------- tabs ----------
-    /// Chats, then all Claude Code sessions, then one tab per project folder (most recently used first), then Settings.
+    /// Chats, then one tab per Claude Code project (in the sidebar's order), then Settings (official firmware only).
     func buildTabs() -> [PuckTab] {
-        let chats = view.chats.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
+        let chats = chatRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
         let settings = Pref.puckTiles && pbFirmware < 1 ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
-        guard Pref.codeTabs, !code.isEmpty else { return out + settings }
-        func row(_ s: CodeSession) -> PuckItem { PuckItem(id: CODE_PREFIX + s.id, name: s.title, code: s) }
-        out.append(PuckTab(id: "code", name: "Claude Code", items: code.prefix(MAX_ROWS).map(row)))
-        var folders: [String] = [], byFolder: [String: [CodeSession]] = [:]
-        for s in code {
-            if byFolder[s.cwd] == nil { folders.append(s.cwd) }
-            byFolder[s.cwd, default: []].append(s)
+        guard Pref.codeTabs else { return out + settings }
+        var projects: [String] = [], byProject: [String: [Chat]] = [:]
+        for c in codeRows {
+            guard let p = c.project else { continue }
+            if byProject[p] == nil { projects.append(p) }
+            byProject[p, default: []].append(c)
         }
-        // Two folders with the same name ("app" and "app") get their parent folder added.
-        let names = folders.map { ($0 as NSString).lastPathComponent }
-        for f in folders.prefix(MAX_TABS - out.count - settings.count) {
-            let base = (f as NSString).lastPathComponent
-            let parent = ((f as NSString).deletingLastPathComponent as NSString).lastPathComponent
-            let name = names.filter { $0 == base }.count > 1 ? "\(parent)/\(base)" : base
-            out.append(PuckTab(id: tabId(forFolder: f), name: name, items: byFolder[f]!.prefix(MAX_ROWS).map(row)))
+        for p in projects.prefix(MAX_TABS - out.count - settings.count) {
+            out.append(PuckTab(id: tabId(forProject: p), name: p, items: byProject[p]!.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
         }
         return out + settings
+    }
+
+    /// Every row the puck can show, from both of Claude's modes.
+    var allRows: [Chat] { chatRows + codeRows }
+
+    static func loadCodeRows() -> [Chat] {
+        (UserDefaults.standard.array(forKey: "codeRows") as? [[String]] ?? []).compactMap { r in
+            r.count >= 2 ? Chat(id: codeId(project: r[0], title: r[1]), title: r[1], element: nil, project: r[0], status: r.count > 2 ? r[2] : "") : nil
+        }
+    }
+    /// Titles only (no conversation text), so the Code tabs are there before Claude next shows its Code sessions.
+    func saveCodeRows() {
+        UserDefaults.standard.set(codeRows.prefix(200).map { [$0.project ?? "Code", $0.title, $0.status] }, forKey: "codeRows")
     }
 
     var currentTab: PuckTab { tabs.first { $0.id == Pref.tab } ?? tabs.first ?? PuckTab(id: "chats", name: "Chats", items: []) }
@@ -1655,7 +1673,7 @@ final class Bridge {
             let v = claude.read()
             if let stop = v.stopButton, id == nil || id == writingChat || openChatId(v) == id {
                 say("Puck → stop Claude"); claude.press(stop)
-            } else if let id = id, busy[id] != nil, v.chats.contains(where: { $0.id == id }) {
+            } else if let id = id, busy[id] != nil, allRows.contains(where: { $0.id == id }) {
                 // Writing in a chat that isn't on screen: open it, then press its Stop (see the main loop).
                 openChat(id, why: "stop")
                 pendingStop = (id, Date())
@@ -1715,6 +1733,8 @@ final class Bridge {
             sendMenu()
         case "pb.menu.tap":
             if let id = msg["id"] as? String { menuTap(id) }
+        case "pb.menu.set":
+            if let id = msg["id"] as? String, let i = msg["index"] as? Int { menuSet(id, index: i) }
         case "fw.accept":
             if let x = fwXfer { x.accepted = true; x.last = Date(); fwNote = "Installing… don't unplug the puck."; pumpFw(); publish() }
         case "fw.progress":
@@ -1748,24 +1768,93 @@ final class Bridge {
 
     // ---------- the puck's own Settings menu (Puck Bridge firmware) ----------
     // The firmware only draws rows and reports taps; each tap moves that setting to its next value here.
-    var menuItems: [(id: String, label: String, value: String)] {
-        var items: [(String, String, String)] = [("character", "Character", characterName(Pref.character))]
-        if let s = puckSettings {
-            items.append(("sound", "Sound", s.muted ? "Off" : soundName(Pref.soundStyle)))
-            items.append(("volume", "Volume", "\(Pref.soundVolume)%"))
-            items.append(("brightness", "Brightness", "\(s.brightness)%"))
-            items.append(("calm", "Calm mode", s.quiet ? "On" : "Off"))
+    // From firmware pb 2 a row can carry its choices: the puck shows them on a picker page (each character drawn as
+    // itself) and reports the one chosen (pb.menu.set).
+    struct MenuRow { let id: String; let label: String; let value: String; var choices: [(value: String, pet: String?, builtin: Bool)] = []; var index = 0 }
+
+    static let volumeSteps = [25, 50, 75, 100], brightnessSteps = [20, 40, 60, 80, 100], clockSteps = [0, 2, 5, 10, 15, 30]
+    static func nearest(_ list: [Int], _ v: Int) -> Int { list.indices.min { abs(list[$0] - v) < abs(list[$1] - v) } ?? 0 }
+    func clockName(_ m: Int) -> String { m == 0 ? "Never" : "\(m) min" }
+
+    var menuRows: [MenuRow] {
+        let chars = characterChoices
+        var character = MenuRow(id: "character", label: "Character", value: characterName(Pref.character))
+        character.choices = chars.prefix(16).map { id in
+            if !isLibrary(id) { return (characterName(id), id, true) }
+            // An imported character can only be drawn when it is the one on the puck (mapped to "claude").
+            let onPuck = custom?.libId == id && custom.map { petHeld.contains($0.id) } == true
+            return (characterName(id), onPuck ? "claude" : nil, false)
         }
-        items.append(("clock", "Clock after", Pref.idleMin == 0 ? "Never" : "\(Pref.idleMin) min"))
-        items.append(("clock24", "24-hour clock", Pref.clock24 ? "On" : "Off"))
-        items.append(("weather", "Weather", Pref.weatherOn ? "On" : "Off"))
-        return items
+        character.index = chars.firstIndex(of: Pref.character) ?? 0
+        var rows = [character]
+        if let s = puckSettings {
+            var sound = MenuRow(id: "sound", label: "Sound", value: s.muted ? "Off" : soundName(Pref.soundStyle))
+            sound.choices = [("Off", nil, false)] + SOUND_STYLES.map { ($0.name, nil, false) }
+            sound.index = s.muted ? 0 : (SOUND_STYLES.firstIndex { $0.id == Pref.soundStyle } ?? 0) + 1
+            var volume = MenuRow(id: "volume", label: "Volume", value: "\(Pref.soundVolume)%")
+            volume.choices = Bridge.volumeSteps.map { ("\($0)%", nil, false) }
+            volume.index = Bridge.nearest(Bridge.volumeSteps, Pref.soundVolume)
+            var bright = MenuRow(id: "brightness", label: "Brightness", value: "\(s.brightness)%")
+            bright.choices = Bridge.brightnessSteps.map { ("\($0)%", nil, false) }
+            bright.index = Bridge.nearest(Bridge.brightnessSteps, s.brightness)
+            rows += [sound, volume, bright, MenuRow(id: "calm", label: "Calm mode", value: s.quiet ? "On" : "Off")]
+        }
+        var clock = MenuRow(id: "clock", label: "Clock after", value: clockName(Pref.idleMin))
+        clock.choices = Bridge.clockSteps.map { (clockName($0), nil, false) }
+        clock.index = Bridge.nearest(Bridge.clockSteps, Pref.idleMin)
+        rows += [clock,
+                 MenuRow(id: "clock24", label: "24-hour clock", value: Pref.clock24 ? "On" : "Off"),
+                 MenuRow(id: "weather", label: "Weather", value: Pref.weatherOn ? "On" : "Off")]
+        return rows
     }
 
     func sendMenu() {
         guard greeted, pbFirmware >= 1 else { return }
-        send(["t": "pb.menu", "title": "Settings",
-              "items": menuItems.map { ["id": $0.id, "label": $0.label, "value": String($0.value.prefix(23))] }])
+        let pickers = pbFirmware >= 2
+        send(["t": "pb.menu", "title": "Settings", "items": menuRows.map { r -> [String: Any] in
+            var m: [String: Any] = ["id": r.id, "label": r.label, "value": String(r.value.prefix(23))]
+            if pickers && !r.choices.isEmpty {
+                m["index"] = r.index
+                m["choices"] = r.choices.map { c -> [String: Any] in
+                    var o: [String: Any] = ["value": String(c.value.prefix(23))]
+                    if let p = c.pet { o["pet"] = p; if c.builtin { o["builtin"] = true } }
+                    return o
+                }
+            }
+            return m
+        }])
+    }
+
+    /// A choice made on the puck's picker page.
+    func menuSet(_ id: String, index: Int) {
+        switch id {
+        case "character":
+            let chars = characterChoices
+            guard chars.indices.contains(index) else { break }
+            if Pref.character != chars[index] { Pref.character = chars[index]; characterChanged() }
+        case "sound":
+            guard puckSettings != nil, (0...SOUND_STYLES.count).contains(index) else { break }
+            if index == 0 { setPuckSettings(["muted": true]) }
+            else {
+                Pref.soundStyle = SOUND_STYLES[index - 1].id
+                if puckSettings?.muted == true { setPuckSettings(["muted": false]) }
+                sendSound(test: true)
+            }
+        case "volume":
+            guard Bridge.volumeSteps.indices.contains(index) else { break }
+            Pref.soundVolume = Bridge.volumeSteps[index]; sendSound(test: true)
+        case "brightness":
+            guard Bridge.brightnessSteps.indices.contains(index) else { break }
+            setPuckSettings(["brightness": Bridge.brightnessSteps[index]])
+        case "clock":
+            guard Bridge.clockSteps.indices.contains(index) else { break }
+            Pref.idleMin = Bridge.clockSteps[index]; nextAmbient = .distantPast
+        default:
+            break
+        }
+        say("Puck menu → \(id) #\(index)")
+        sendMenu()
+        publish()
     }
 
     func sendSound(test: Bool = false) {
@@ -1853,18 +1942,37 @@ final class Bridge {
     }
 
     func openChat(_ id: String, why: String) {
-        if id.hasPrefix(CODE_PREFIX) {
-            // Not yet: opening a Code session needs Claude's Code tab mapped (see AGENTS.md roadmap).
-            if why == "tap" { toast("Open Code sessions in Claude for now") }
+        let v = claude.read()
+        if let chat = v.chats.first(where: { $0.id == id }) { opened(chat, why: why); return }
+        // On Claude's other mode (or remembered from the last run): switch the sidebar, then open it (finishPendingOpen).
+        guard let row = allRows.first(where: { $0.id == id }) else { say("Asked to open a chat that's no longer in the sidebar"); return }
+        guard claude.show(row.isCode ? .code : .chat, in: v) else {
+            if why == "tap" { toast("Couldn't switch Claude to its \(row.isCode ? "Code" : "Chat") list") }
             return
         }
-        let v = claude.read()
-        guard let chat = v.chats.first(where: { $0.id == id }) else { say("Asked to open a chat that's no longer in the sidebar"); return }
+        pendingOpen = (id, row.title, Date(), why)
+    }
+
+    private func opened(_ chat: Chat, why: String) {
         say("Open \"\(chat.title)\" (\(why))")
         openedFromPuck = chat.id
         openedAt = Date()
         lastOpenedId = chat.id
         claude.open(chat, bringForward: Pref.bringForward || why == "menu")
+    }
+
+    /// After a mode switch: find the row again (Claude re-draws the list, and chats can get new ids) and open it.
+    func finishPendingOpen() {
+        guard let p = pendingOpen else { return }
+        let v = claude.read()
+        let code = p.id.hasPrefix(CODE_PREFIX)
+        if let c = v.chats.first(where: { $0.id == p.id }) ?? v.chats.first(where: { $0.title == p.title && $0.isCode == code }) {
+            pendingOpen = nil
+            opened(c, why: p.why)
+        } else if Date().timeIntervalSince(p.at) > 4 {
+            pendingOpen = nil
+            say("Couldn't find \"\(p.title)\" after switching Claude's list")
+        }
     }
 
     // ---------- puck settings ----------
@@ -2051,11 +2159,8 @@ final class Bridge {
             if !turn.upload.isEmpty { m["uploadId"] = turn.upload }
             perform { $0.send(m) }
         }
-        if turn.agentId?.hasPrefix(CODE_PREFIX) == true {
-            say("Voice: ignored (a Claude Code session was selected; voice only works for chats so far)")
-            reply(["t": "voice.error", "message": "Voice works in the Chats tab for now"]); return
-        }
         let lastOpened = lastOpenedId
+        let known = allRows.first { $0.id == turn.agentId }
         say("Voice: \(turn.pcm.count / 1024) KB of audio, transcribing…")
         Transcriber.authorize { ok in
             guard ok else {
@@ -2072,7 +2177,7 @@ final class Bridge {
                     if textOut.isEmpty { reply(["t": "voice.error", "message": "Didn't catch that"]); return }
                     say("Voice: heard \(textOut.split(separator: " ").count) words")
                     self.deliverQueue.async {
-                        let target = self.deliver(textOut, to: turn.agentId, lastOpened: lastOpened)
+                        let target = self.deliver(textOut, to: turn.agentId, known: known, lastOpened: lastOpened)
                         reply(["t": "voice.transcript", "routeId": "", "text": textOut,
                                "agentId": target?.id ?? (turn.agentId ?? "claude"),
                                "agentName": target?.title ?? "Claude", "needsConfirm": false])
@@ -2085,15 +2190,27 @@ final class Bridge {
     /// Put the words into Claude's message box (in the chat picked on the puck) and, if enabled, send.
     /// Runs on deliverQueue (it sleeps), so bridge state is only changed through perform.
     @discardableResult
-    func deliver(_ words: String, to chatId: String?, lastOpened: String) -> Chat? {
+    func deliver(_ words: String, to chatId: String?, known: Chat?, lastOpened: String) -> Chat? {
         var v = claude.read()
         var target: Chat?
-        if let id = chatId, let c = v.chats.first(where: { $0.id == id }) {
-            target = c
-            if id != lastOpened {
-                claude.open(c, bringForward: true)
-                perform { $0.lastOpenedId = id; $0.openedFromPuck = id; $0.openedAt = Date() }
-                Thread.sleep(forTimeInterval: 1.0)
+        var switched = false
+        if let id = chatId {
+            var c = v.chats.first { $0.id == id }
+            if c == nil, let k = known, claude.show(k.isCode ? .code : .chat, in: v) {
+                // It's on Claude's other list (chats vs Code sessions): switch, then find it again.
+                switched = true
+                Thread.sleep(forTimeInterval: 0.9)
+                v = claude.read()
+                c = v.chats.first { $0.id == id } ?? v.chats.first { $0.title == k.title && $0.isCode == k.isCode }
+            }
+            if let c = c {
+                target = c
+                if c.id != lastOpened || switched {
+                    claude.open(c, bringForward: true)
+                    let cid = c.id
+                    perform { $0.lastOpenedId = cid; $0.openedFromPuck = cid; $0.openedAt = Date() }
+                    Thread.sleep(forTimeInterval: 1.0)
+                }
             }
         }
         claude.running?.activate()
@@ -2139,6 +2256,11 @@ final class Bridge {
     // ---------- Claude watching ----------
     /// The chat on screen: the one whose title shows in the conversation area (its header). nil = can't tell.
     func openChatId(_ v: ClaudeView) -> String? {
+        // The conversation's own title (its web area: "<title> - Claude Code"), when exactly one row has it.
+        if !v.openTitle.isEmpty {
+            let same = v.chats.filter { $0.title == v.openTitle }
+            if same.count == 1 { return same[0].id }
+        }
         var titles: [String: String] = [:]   // title -> id, only titles no other chat shares
         var dup = Set<String>()
         for c in v.chats {
@@ -2174,7 +2296,7 @@ final class Bridge {
                 say("Claude Desktop isn't running")
                 for id in busy.keys { send(["t": "turn.done", "agentId": id]) }
                 busy = [:]; writingChat = nil
-                view = ClaudeView(); pushChats(); publish()
+                view = ClaudeView(); chatRows = []; pushChats(); publish()
             }
             return
         }
@@ -2182,23 +2304,6 @@ final class Bridge {
         var cur = claude.read()
         let first = !claudeReadOnce
         claudeReadOnce = true
-
-        // On Claude's Code tab the sidebar lists Claude Code sessions, not chats. Recognise them by their titles
-        // (the same ones ~/.claude/projects has) and keep the chat list from the Chat tab.
-        func norm(_ t: String) -> String {
-            String(t.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(40))
-        }
-        let codeTitles = code.map { norm($0.title) }.filter { $0.count >= 6 }
-        if !cur.chats.isEmpty && !codeTitles.isEmpty {
-            let hits = cur.chats.filter { c in
-                let t = norm(c.title)
-                return t.count >= 6 && codeTitles.contains { $0.hasPrefix(t) || t.hasPrefix($0) }
-            }.count
-            let codeTab = hits * 2 >= cur.chats.count
-            if codeTab != inCodeTab { say(codeTab ? "Claude is on its Code tab; keeping the chat list" : "Claude is back on its chats") }
-            inCodeTab = codeTab
-            if codeTab { cur.chats = prev.chats; cur.writing = false }
-        }
 
         if cur.chats.isEmpty && !prev.chats.isEmpty {
             emptyReads += 1
@@ -2213,7 +2318,22 @@ final class Bridge {
         if !settled { cur.writing = prev.writing }
 
         let now = Date()
-        for c in cur.chats where firstSeen[c.id] == nil { firstSeen[c.id] = seenOnce ? now : .distantPast }
+        // The sidebar shows one mode's list at a time: keep each list from when it was last on screen. Claude re-draws
+        // the list on a switch (chats can come back with new ids) and a Code session's id follows its title.
+        let switchedMode = !first && prev.mode != cur.mode
+        if cur.mode == .code {
+            carryIds(from: codeRows, to: cur.chats)
+            let before = codeRows
+            codeRows = cur.chats
+            if before.map({ $0.id + $0.status }) != codeRows.map({ $0.id + $0.status }) { saveCodeRows() }
+            watchCodeStatuses(codeRows, before: before, now: now)
+        } else {
+            carryIds(from: chatRows, to: cur.chats)
+            chatRows = cur.chats
+        }
+        if switchedMode { say("Claude shows its \(cur.mode == .code ? "Code sessions" : "chats")") }
+        // A row is "new" (a chat started from the home screen) only if it appears while its list is on screen.
+        for c in cur.chats where firstSeen[c.id] == nil { firstSeen[c.id] = seenOnce && !switchedMode ? now : .distantPast }
         seenOnce = true
         let open = openChatId(cur)
         func title(_ id: String) -> String { cur.chats.first { $0.id == id }?.title ?? "a chat" }
@@ -2276,10 +2396,11 @@ final class Bridge {
                   "recap": String(text.prefix(190)), "text": String(text.prefix(1500)), "silent": true])
             say("\"\(title(o))\" finished while you were away")
         }
-        // Rows that left the sidebar can't be busy any more.
-        for id in busy.keys where !cur.chats.contains(where: { $0.id == id }) && !cur.chats.isEmpty { endBusy(id) }
+        // Rows that left the sidebar can't be busy any more (only the list on screen can tell).
+        for id in busy.keys where id.hasPrefix(CODE_PREFIX) == (cur.mode == .code)
+            && !cur.chats.contains(where: { $0.id == id }) && !cur.chats.isEmpty { endBusy(id) }
 
-        let changed = first || cur.chats.map({ $0.id + $0.title }) != view.chats.map({ $0.id + $0.title }) || cur.writing != view.writing
+        let changed = first || switchedMode || cur.chats.map({ $0.id + $0.title }) != view.chats.map({ $0.id + $0.title }) || cur.writing != view.writing
         view = cur
         if greeted { pushChats() }
         if changed { publish() }
@@ -2295,6 +2416,62 @@ final class Bridge {
         return joined.isEmpty ? v.lastReply : joined
     }
 
+    /// Carry state from ids that left the list to the ids that replaced them: the same title after Claude re-drew the
+    /// list, or (Code sessions, whose id follows the title) the one session of the same project that was renamed.
+    func carryIds(from old: [Chat], to new: [Chat]) {
+        let newIds = Set(new.map { $0.id }), oldIds = Set(old.map { $0.id })
+        let gone = old.filter { !newIds.contains($0.id) }, added = new.filter { !oldIds.contains($0.id) }
+        guard !gone.isEmpty, !added.isEmpty else { return }
+        var map: [String: String] = [:]
+        for g in gone {
+            let same = added.filter { $0.title == g.title && $0.project == g.project }
+            if same.count == 1 { map[g.id] = same[0].id }
+            else if g.isCode, gone.count == 1, added.count == 1, added[0].project == g.project { map[g.id] = added[0].id }
+        }
+        for (o, n) in map {
+            if let b = busy.removeValue(forKey: o) { busy[n] = b }
+            if let f = firstSeen[o] { firstSeen[n] = f }
+            if writingChat == o { writingChat = n }
+            if lastOpenedId == o { lastOpenedId = n }
+            if openedFromPuck == o { openedFromPuck = n }
+        }
+    }
+
+    /// "#5 · Merged" → "Merged": the part of a Code session's status that isn't its pull request number.
+    static func statusWord(_ s: String) -> String {
+        s.replacingOccurrences(of: "^#[0-9]+ · ", with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+    }
+    static func isWorking(_ status: String) -> Bool {
+        statusWord(status).range(of: "\\b(working|running|thinking|generating|responding|in progress)\\b",
+                                 options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// Code sessions keep running when they're not on screen, and their sidebar status may say so. Unverified: which
+    /// words Claude uses while a session works (seen so far: Idle, Open, Merged); every new word is logged once.
+    func watchCodeStatuses(_ rows: [Chat], before: [Chat], now: Date) {
+        for r in rows {
+            let w = Bridge.statusWord(r.status)
+            if !w.isEmpty, codeStatuses.insert(w).inserted { say("Code session status seen: \"\(w)\"") }
+        }
+        let was = Dictionary(before.map { ($0.id, $0.status) }, uniquingKeysWith: { a, _ in a })
+        for r in rows where r.id != writingChat {
+            let working = Bridge.isWorking(r.status)
+            if working {
+                if busy[r.id] == nil {
+                    busy[r.id] = BusyChat(since: now, textsBefore: [], labels: [], prompt: "", awaySince: now)
+                    say("A Code session in \(r.project ?? "Code") is working (sidebar)")
+                    send(["t": "turn.started", "agentId": r.id, "text": "Working…"])
+                    nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
+                } else if busy[r.id]?.awaySince != nil {
+                    busy[r.id]?.awaySince = now   // still visibly working: don't give up on it
+                }
+            } else if let w = was[r.id], Bridge.isWorking(w), busy[r.id] != nil {
+                endBusy(r.id)
+                notify(r, "Claude finished in \(r.project ?? "Code").")
+            }
+        }
+    }
+
     // ---------- actions from the menu / Settings window (run via perform) ----------
     func lend() {
         released = true
@@ -2307,7 +2484,7 @@ final class Bridge {
     func reconnect() { dropPuck("reconnect requested"); nextConnect = Date() }
     func testAlert() {
         guard greeted else { say("Test alert: the puck isn't connected"); return }
-        let chat = view.chats.first { $0.id == lastOpenedId } ?? view.chats.first
+        let chat = allRows.first { $0.id == lastOpenedId } ?? allRows.first
         send(["t": "summary", "agentId": chat?.id ?? "claude", "name": chat?.title ?? "Claude", "engine": engine,
               "machine": MACHINE_NAME, "recap": "Test alert from Puck Bridge. Finished replies look like this.",
               "text": "Test alert from Puck Bridge. Finished replies look like this."])
@@ -2333,6 +2510,8 @@ final class Bridge {
                     for (type, payload) in decoder.feed(data) {
                         if type == T_PCM {
                             if voice != nil && voice!.pcm.count < 4_000_000 { voice!.pcm += payload }
+                        } else if type == T_LOG {
+                            puckLog(payload)
                         } else if type == T_JSON,
                                   let obj = try? JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any] {
                             handle(obj)
@@ -2361,7 +2540,8 @@ final class Bridge {
                 if greeted { for id in busy.keys { send(["t": "turn.started", "agentId": id, "text": "Writing…"]) } }
                 nextBusyRefresh = busy.isEmpty ? .distantFuture : now.addingTimeInterval(10)
             }
-            if let p = pendingStop, now.timeIntervalSince(p.at) > 1.5 {
+            if pendingOpen != nil, now.timeIntervalSince(pendingOpen!.at) > 0.7 { finishPendingOpen() }
+            if let p = pendingStop, now.timeIntervalSince(p.at) > 2.0, pendingOpen == nil {
                 pendingStop = nil
                 let v = claude.read()
                 if let stop = v.stopButton { say("Puck → stop Claude"); claude.press(stop) } else { toast("Claude isn't writing") }
@@ -2385,16 +2565,18 @@ final class Bridge {
         }
     }
 
+    /// The puck's own log lines (frame type 0x04) go into PuckBridge.log, at most 20 a second.
+    var puckLogWindow = (start: Date.distantPast, count: 0)
+    func puckLog(_ payload: [UInt8]) {
+        let now = Date()
+        if now.timeIntervalSince(puckLogWindow.start) >= 1 { puckLogWindow = (now, 0) }
+        puckLogWindow.count += 1
+        guard puckLogWindow.count <= 20 else { return }
+        let line = String(decoding: payload.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !line.isEmpty { say("puck: \(line)") }
+    }
+
     func tickClaude() {
-        if Date().timeIntervalSince(lastCodeRead) >= 5.0 {
-            lastCodeRead = Date()
-            let before = code.map { $0.id + $0.title }
-            code = Pref.codeTabs ? codeSessions.recent() : []
-            if code.map({ $0.id + $0.title }) != before {
-                if greeted { pushChats() }
-                publish()
-            }
-        }
         guard Date().timeIntervalSince(lastClaudeRead) >= 1.0 else { return }
         lastClaudeRead = Date()
         let trusted = AXIsProcessTrusted()
@@ -2574,14 +2756,17 @@ final class AppModel: ObservableObject {
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
     @Published var weatherNote = ""
+    @Published var skipped: Set<SetupStep> = []
     let weather = WeatherService()
+    let helper = AccessibilityHelper()
     let signedAs = signingIdentity()
     var onChange: (() -> Void)?
+    var showSetup: (() -> Void)?
 
     init(bridge: Bridge, updater: Updater) {
         self.bridge = bridge
         self.updater = updater
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refreshPermissions() }
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPermissions() }
         DispatchQueue.global(qos: .userInitiated).async {
             CharacterLibrary.shared.migrate()
             CharacterLibrary.shared.reload()
@@ -2737,7 +2922,7 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func refreshCode() { bridge.perform { b in b.lastCodeRead = .distantPast } }
+    func refreshCode() { bridge.perform { b in if b.greeted { b.pushChats() }; b.publish() } }
 
     // ---------- puck settings ----------
     func setPuck(_ key: String, _ value: Any) {
@@ -2767,6 +2952,21 @@ final class AppModel: ObservableObject {
         }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
+    var setupSteps: [SetupStep] { Pref.weatherOn ? SetupStep.allCases : [.accessibility, .speech] }
+    func granted(_ s: SetupStep) -> Bool {
+        switch s {
+        case .accessibility: return axTrusted
+        case .speech: return speech == .authorized
+        case .location: return locationAllowed
+        }
+    }
+    var needsSetup: Bool { setupSteps.contains { !granted($0) } }
+    /// System Settings on Accessibility, and the helper card beside it.
+    func startAccessibilityHelp() {
+        openAccessibility()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { if !AXIsProcessTrusted() { self.helper.show() } }
+    }
+
     func openAccessibility() {
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
@@ -2951,6 +3151,9 @@ struct GeneralPane: View {
                 if Pref.weatherOn {
                     PermissionRow(title: "Location", detail: "For the weather on the puck's clock face. Only a rounded location goes to Open-Meteo.",
                                   granted: model.locationAllowed, action: model.allowLocation)
+                }
+                if model.needsSetup {
+                    HStack { Spacer(); Button("Walk Me Through It…") { model.showSetup?() } }
                 }
                 if !model.axTrusted {
                     Text("Already switched on in System Settings? After an update macOS can keep a stale entry. Select Puck Bridge in the list, remove it with −, then add it again with +.")
@@ -3242,7 +3445,7 @@ struct ClaudePane: View {
             Section("Claude Code") {
                 Toggle("Show Claude Code sessions as tabs on the puck", isOn: $codeTabs)
                     .onChange(of: codeTabs) { _, _ in model.refreshCode() }
-                Text("Hold the puck's face to switch tabs: Chats, Claude Code, and one per project folder. Opening a Code session or talking to it from the puck isn't supported yet.")
+                Text("Hold the puck's face to switch tabs: Chats, then one per Claude Code project, as Claude's sidebar groups them. Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that. Opening a session from the puck switches Claude to the right list.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("When Claude finishes") {
@@ -3314,6 +3517,158 @@ struct SettingsView: View {
     }
 }
 
+// ---------- first-run setup: one permission at a time ----------
+enum SetupStep: Int, CaseIterable, Identifiable { case accessibility, speech, location; var id: Int { rawValue } }
+
+/// A small window that walks through the permissions and moves on by itself as each is granted (AppModel polls them).
+struct SetupView: View {
+    @ObservedObject var model: AppModel
+    var close: () -> Void
+    @State private var asked: Set<SetupStep> = []
+    var current: SetupStep? { model.setupSteps.first { !model.granted($0) && !model.skipped.contains($0) } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 6) {
+                ForEach(model.setupSteps) { s in
+                    Capsule().fill(model.granted(s) ? Color.green : s == current ? Color.accentColor : Color.secondary.opacity(0.25))
+                        .frame(height: 4)
+                }
+            }
+            if let step = current { page(step) } else {
+                Label("You're all set", systemImage: "checkmark.circle.fill").font(.title2.weight(.semibold)).foregroundStyle(.green)
+                Text("Puck Bridge can see Claude, hear the puck and show the weather. macOS remembers this, also after updates.")
+                    .foregroundStyle(.secondary)
+                HStack { Spacer(); Button("Done") { close() }.keyboardShortcut(.defaultAction) }
+            }
+        }
+        .padding(22)
+        .frame(width: 460)
+        .onChange(of: current == nil) { _, done in
+            if done { model.helper.hide(); DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { close() } }
+        }
+    }
+
+    @ViewBuilder func page(_ step: SetupStep) -> some View {
+        let n = (model.setupSteps.firstIndex(of: step) ?? 0) + 1
+        Text("Step \(n) of \(model.setupSteps.count)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+        switch step {
+        case .accessibility:
+            Text("Let Puck Bridge see Claude").font(.title2.weight(.semibold))
+            Text("This is how it reads your chats, opens them and presses Stop. macOS only lets you switch it on yourself: click the button, then turn on Puck Bridge in the list. A small card beside System Settings shows where.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
+                Text("Puck Bridge")
+                Spacer()
+                Toggle("", isOn: .constant(false)).toggleStyle(.switch).labelsHidden().disabled(true)
+            }
+            .padding(10).background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+            Text("This window moves on by itself once it's on.").font(.caption).foregroundStyle(.secondary)
+            buttons(step, primary: "Open System Settings") { model.startAccessibilityHelp() }
+        case .speech:
+            Text("Let the puck take your voice").font(.title2.weight(.semibold))
+            Text("What you say into the puck is turned into text on this Mac and typed into Claude. Click Allow when macOS asks.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            buttons(step, primary: model.speech == .notDetermined ? "Ask Me" : "Open System Settings") { model.fixSpeech() }
+        case .location:
+            Text("Weather on the puck's clock").font(.title2.weight(.semibold))
+            Text("Puck Bridge uses this Mac's rough location for the forecast (only a rounded position goes to Open-Meteo). Click Allow when macOS asks, or turn the weather off.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Turn Weather Off") { model.setWeather(false); model.objectWillChange.send() }
+                Spacer()
+                Button("Skip") { model.skipped.insert(step) }
+                Button(model.weather.status == .notDetermined ? "Ask Me" : "Open System Settings") { model.allowLocation() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    func buttons(_ step: SetupStep, primary: String, _ act: @escaping () -> Void) -> some View {
+        HStack {
+            Spacer()
+            Button("Skip") { model.skipped.insert(step); if step == .accessibility { model.helper.hide() } }
+            Button(primary) { asked.insert(step); act() }.keyboardShortcut(.defaultAction)
+        }
+    }
+}
+
+/// The card that floats beside System Settings → Accessibility while the switch is off. Its icon can be dragged into
+/// the list (for when macOS didn't add Puck Bridge there itself). It goes away as soon as macOS reports the grant.
+final class AccessibilityHelper {
+    private var panel: NSPanel?
+    private var timer: Timer?
+
+    func show() {
+        if panel == nil {
+            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 270, height: 250),
+                            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel], backing: .buffered, defer: false)
+            p.contentViewController = NSHostingController(rootView: HelperCard())
+            p.title = "Puck Bridge"
+            p.level = .floating
+            p.isFloatingPanel = true
+            p.hidesOnDeactivate = false
+            p.isReleasedWhenClosed = false
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel = p
+        }
+        place()
+        panel?.orderFrontRegardless()
+        timer?.invalidate()
+        var ticks = 0
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            ticks += 1
+            if AXIsProcessTrusted() { self.hide(); return }
+            if ticks <= 12 { self.place() }   // System Settings may still be opening or moving
+            if ticks > 1200 { self.hide() }    // 10 minutes
+        }
+    }
+
+    func hide() { timer?.invalidate(); timer = nil; panel?.orderOut(nil) }
+
+    /// Right of System Settings' window (its frame is readable without any permission), else left of it, else the
+    /// top-right of the screen.
+    private func place() {
+        guard let p = panel, let main = NSScreen.screens.first else { return }
+        let size = p.frame.size
+        var origin = NSPoint(x: main.visibleFrame.maxX - size.width - 20, y: main.visibleFrame.maxY - size.height - 20)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let settings = list.first { w in
+            guard (w[kCGWindowLayer as String] as? Int) == 0, let pid = w[kCGWindowOwnerPID as String] as? pid_t else { return false }
+            return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.systempreferences"
+        }
+        if let b = settings?[kCGWindowBounds as String] as? [String: CGFloat],
+           let x = b["X"], let y = b["Y"], let w = b["Width"] {
+            // Window-server bounds have their origin at the main display's top left; AppKit's at its bottom left.
+            let top = main.frame.maxY - y
+            let screen = NSScreen.screens.first { $0.frame.contains(NSPoint(x: x + 1, y: top - 1)) } ?? main
+            origin.y = top - size.height - 40
+            if x + w + 12 + size.width <= screen.visibleFrame.maxX { origin.x = x + w + 12 }
+            else if x - 12 - size.width >= screen.visibleFrame.minX { origin.x = x - 12 - size.width }
+            else { origin.x = x + w - size.width - 16 }
+        }
+        p.setFrameOrigin(origin)
+    }
+}
+
+struct HelperCard: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64)
+                .onDrag { NSItemProvider(contentsOf: Bundle.main.bundleURL) ?? NSItemProvider() }
+                .help("Drag into the Accessibility list")
+            Text("Turn on Puck Bridge").font(.headline)
+            Text("Find Puck Bridge in the list and switch it on. Not in the list? Drag this icon into it.")
+                .font(.callout).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            Text("Already on but not working? Select it, click −, then drag this icon in again.")
+                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 270)
+    }
+}
+
 // ============================================================================================
 // MARK: Menu-bar app
 // ============================================================================================
@@ -3334,12 +3689,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bridge.onSnapshot = { [weak self] s in self?.model.update(s) }
         model.onChange = { [weak self] in self?.updateIcon() }
 
-        // Ask for permissions up front so voice works the first time.
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        if !AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.showSettings(.general) }
-        }
-        Transcriber.authorize { _ in }
+        // A permission missing (first run, a new Mac): walk through them, one at a time.
+        model.showSetup = { [weak self] in self?.showSetup() }
+        if model.needsSetup { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.showSetup() } }
 
         bridge.weather = model.weather
         model.weather.onChange = { [weak self] in self?.model.weatherChanged() }
@@ -3368,7 +3720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(title)
         menu.addItem(add(s.puck, #selector(openGeneral)))
         menu.addItem(add(s.claude, s.claudeRunning ? #selector(openGeneral) : #selector(launchClaude)))
-        if !model.axTrusted { menu.addItem(add("⚠︎ Allow Accessibility so Puck Bridge can see Claude…", #selector(allowAccessibility))) }
+        if model.needsSetup { menu.addItem(add(model.axTrusted ? "Finish Setting Up…" : "⚠︎ Allow Accessibility so Puck Bridge can see Claude…", #selector(allowAccessibility))) }
         menu.addItem(.separator())
 
         if !s.chats.isEmpty {
@@ -3380,6 +3732,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let parent = NSMenuItem(title: "Open Chat", action: nil, keyEquivalent: "")
             parent.submenu = chats
+            menu.addItem(parent)
+        }
+        if !s.code.isEmpty {
+            let projects = NSMenu()
+            for (project, items) in s.code.prefix(25) {
+                let sessions = NSMenu()
+                for c in items.prefix(25) {
+                    let i = add(c.title, #selector(openChatItem(_:)))
+                    i.representedObject = c.id
+                    sessions.addItem(i)
+                }
+                let p = NSMenuItem(title: project, action: nil, keyEquivalent: "")
+                p.submenu = sessions
+                projects.addItem(p)
+            }
+            let parent = NSMenuItem(title: "Open Code Session", action: nil, keyEquivalent: "")
+            parent.submenu = projects
             menu.addItem(parent)
         }
 
@@ -3436,7 +3805,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openGeneral() { showSettings(.general) }
     @objc func openCharacter() { showSettings(.character) }
     @objc func launchClaude() { model.openClaude() }
-    @objc func allowAccessibility() { model.openAccessibility(); showSettings(.general) }
+    @objc func allowAccessibility() { showSetup() }
+
+    var setupWindow: NSWindow?
+    func showSetup() {
+        if setupWindow == nil {
+            let host = NSHostingController(rootView: SetupView(model: model, close: { [weak self] in self?.setupWindow?.close() }))
+            let w = NSWindow(contentViewController: host)
+            w.title = "Set Up Puck Bridge"
+            w.styleMask = [.titled, .closable]
+            w.isReleasedWhenClosed = false
+            w.center()
+            setupWindow = w
+        }
+        model.skipped = []
+        NSApp.activate()
+        setupWindow?.makeKeyAndOrderFront(nil)
+    }
     @objc func checkUpdates() { model.checkUpdates(interactive: true) }
     @objc func openChatItem(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }

@@ -1,0 +1,20 @@
+# Swipe up on the face: the panes list (AGENTS: Focus's pane pages); a tap on a page opens it.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+time +200
+mark
+swipe 233 330 233 120 200
+expect view AGENTS
+expect noout "t":"scroll"
+shot out/swipe_up_panes.png
+echo --- the pull-down from the badge still opens the inbox when something is unread
+boot tap
+swipe 330 233 120 233 200
+in {"t":"summary","agentId":"c3","name":"Grocery list","engine":"claude","machine":"Mac Studio","recap":"Added oat milk.","text":"Added oat milk."}
+time +200
+view
+swipe 233 120 233 330 200
+expect view INBOX

@@ -2,7 +2,7 @@
 
 Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop** — no OpenHarness needed.
 
-- Your recent Claude chats appear on the puck. Pause on one → Claude opens it.
+- Your recent Claude chats appear on the puck, and your Claude Code sessions too, one tab per project. Pause on one → Claude opens it.
 - Claude finishes a reply → the puck beeps and shows the start of the reply.
 - Tap-and-speak on the puck → transcribed on your Mac → typed into the chat and sent.
 - Small (bottom) button while Claude is writing → stop Claude.
@@ -17,13 +17,17 @@ Or in Terminal:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mattsinitiere/puckbridge/main/scripts/install.sh | bash
 ```
-Then approve **Accessibility** and **Speech Recognition** for *Puck Bridge* (◎ → **Settings…** → General shows what's missing), and turn on **Start Puck Bridge when you log in** there.
+The first time it opens, a small **Set Up Puck Bridge** window walks you through the permissions one at a time (Accessibility, Speech Recognition, Location for the weather) and moves on by itself as each is switched on. Then turn on **Start Puck Bridge when you log in** in ◎ → Settings… → General.
 
 ## Update
 ◎ menu → **Check for updates…** (it also checks daily). Or re-run the install line.
 
-## Puck Bridge firmware (clock face, home button, sounds)
-◎ → Settings… → **Puck** → **Firmware** → **Install…** puts Puck Bridge's firmware on the puck over the USB cable (about a minute; keep it plugged in). It adds a clock + weather home screen, a Settings menu on the puck, finish-sound choices, and makes the small button a home button (tap: clock · hold while Claude writes: stop). **Restore…** in the same place puts Autonomous's official firmware back.
+## Puck Bridge firmware (clock, side pages, settings, sounds)
+◎ → Settings… → **Puck** → **Firmware** → **Install…** puts Puck Bridge's firmware on the puck over the USB cable (about a minute; keep it plugged in). **Restore…** in the same place puts Autonomous's official firmware back. What it adds:
+- **Side pages:** Settings ← Clock → your chats. Swipe sideways to move, swipe up on a chat for the list of all of them.
+- **Clock home screen:** big time, date, weather, your character, and a ring with one segment per chat (orange while Claude works, white when a reply is waiting). It comes up after 5 idle minutes, and the small button always goes there.
+- **Settings on the puck:** character (pick from animated previews), sound, volume, brightness, calm mode, clock delay, 24-hour, weather.
+- **Small button:** tap → clock · hold while Claude writes → stop.
 
 ## Try work in progress (Beta Access)
 Every branch pushed to GitHub gets a preview build. ◎ → Settings… → General → turn on **Beta Access**, then **Install…** next to the branch you want. **Back to the Release…** returns to the normal version. Previews can be unfinished.

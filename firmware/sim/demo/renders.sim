@@ -1,0 +1,45 @@
+# Renders for the owner (out/renders/): the real firmware's scenes through the sim. Run from the sim directory.
+log 1
+autoping 1
+include demo/lib/welcome.sim
+echo --- (a) idle, no panes
+in {"t":"agents.begin"}
+in {"t":"agents.end","total":0,"tab":"chats"}
+include demo/lib/pbhost.sim
+boot tap
+shot out/renders/clock_a_idle_no_panes.png
+echo --- (b) five panes: pane 2 working, pane 4 finished and unread
+include demo/lib/chats5.sim
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+in {"t":"summary","agentId":"c4","name":"Taxes 2026","engine":"claude","machine":"Mac Studio","recap":"Your estimate is ready.","text":"Your estimate is ready."}
+in {"t":"ambient","time":"12:44","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"H 75°  L 58°","idleMin":5}
+boot tap
+shot out/renders/clock_b_5_panes_1_busy_1_unread.png
+echo --- (c) 24-hour, no weather
+in {"t":"ambient","time":"15:44","ampm":"","date":"Tuesday, Oct 13","temp":"","cond":"","hilo":"","idleMin":5}
+shot out/renders/clock_c_24h_no_weather.png
+echo --- the settings list and its pickers
+in {"t":"ambient","time":"3:44","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"H 75°  L 58°","idleMin":5}
+swipe 120 233 330 233 200
+include demo/lib/menu.sim
+shot out/renders/settings_list.png
+tap 233 144 120
+swipe 330 200 120 200 200
+swipe 330 200 120 200 200
+expect view PICKER
+shot out/renders/picker_character_jolly.png
+time +450
+shot out/renders/picker_character_jolly_next_frame.png
+tap 100 70 100
+tap 233 208 120
+expect view PICKER
+shot out/renders/picker_sound_chime.png
+echo --- the chat face (pb.2 adds no dots there: its lower arc carries the status line)
+boot tap
+boot tap
+swipe 330 233 120 233 200
+expect view HOME
+shot out/renders/chat_face_pane1.png
+swipe 233 330 233 120 200
+expect view AGENTS
+shot out/renders/panes_list_swipe_up.png

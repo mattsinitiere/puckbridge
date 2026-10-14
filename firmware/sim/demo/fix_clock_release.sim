@@ -1,0 +1,37 @@
+# FIX 3: the clock decides on the RELEASE, not on the first DOWN sample.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+expect view CLOCK
+echo --- a finger that lands where [ settings ] used to be decides nothing until it lifts
+touch down 233 410
+time +80
+expect view CLOCK
+mark
+touch up
+expect view HOME
+expect noout pb.menu.open
+echo --- a long press is still a press back to the face, any drift and up to any length
+boot tap
+tap 200 300 900
+expect view HOME
+echo --- a vertical drag on the clock: back to the face, and nothing reaches the desktop
+boot tap
+mark
+swipe 233 120 233 330 200
+expect view HOME
+expect noout "t":"scroll"
+echo --- right: the settings page (pb.menu.open), left: the pane on the face
+boot tap
+mark
+swipe 120 233 330 233 200
+expect view PBMENU
+expect out "t":"pb.menu.open"
+boot tap
+mark
+swipe 330 233 120 233 200
+expect view HOME
+expect noout pb.menu.open

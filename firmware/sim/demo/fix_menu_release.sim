@@ -1,0 +1,37 @@
+# FIX 1: settings rows (and the picker's controls) answer a press released inside the row within 1800 ms,
+# not the tap classifier's 12 px / 25..350 ms.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+swipe 120 233 330 233 200
+include demo/lib/menu.sim
+expect view PBMENU
+echo --- a slow press (400 ms) on "Volume" (row 3, y 240..303)
+mark
+tap 233 272 400
+expect out {"t":"pb.menu.tap","id":"volume"}
+echo --- a 10 ms flick
+mark
+tap 233 272 10
+expect out {"t":"pb.menu.tap","id":"volume"}
+echo --- a thumb that drifts 20 px while pressing
+mark
+swipe 230 268 246 283 160
+expect out {"t":"pb.menu.tap","id":"volume"}
+echo --- a press held past 1800 ms is no press
+mark
+tap 233 272 2000
+expect noout pb.menu.tap
+echo --- a drag that scrolls the list is no press, even if it ends on a row
+mark
+swipe 233 330 233 190 400
+expect noout pb.menu.tap
+state
+echo --- a sideways swipe that starts on a row pages back to the clock, and taps nothing
+mark
+swipe 330 272 120 272 200
+expect view CLOCK
+expect noout pb.menu.tap

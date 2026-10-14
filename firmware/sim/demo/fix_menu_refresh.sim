@@ -1,0 +1,25 @@
+# FIX 2: a pb.menu that lands while a finger is down cancels the contact only when the row under it changed.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+swipe 120 233 330 233 200
+include demo/lib/menu.sim
+echo --- the same rows again while "Volume" is held: the press still counts
+mark
+touch down 233 272
+time +40
+in {"t":"pb.menu","title":"Settings","items":[{"id":"character","label":"Character","value":"Clawd"},{"id":"sound","label":"Sound","value":"Chime"},{"id":"volume","label":"Volume","value":"75%"},{"id":"brightness","label":"Brightness","value":"40%"}]}
+time +40
+touch up
+expect out {"t":"pb.menu.tap","id":"volume"}
+echo --- a list where another setting now sits under the finger: the press is dropped
+mark
+touch down 233 272
+time +40
+in {"t":"pb.menu","title":"Settings","items":[{"id":"character","label":"Character","value":"Clawd"},{"id":"volume","label":"Volume","value":"75%"},{"id":"weather","label":"Weather","value":"On"}]}
+time +40
+touch up
+expect noout pb.menu.tap
