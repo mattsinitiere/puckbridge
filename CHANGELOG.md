@@ -6,6 +6,12 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 ### Added
+- **Custom timers on the puck** (Puck Bridge firmware 0.0.88-pb.7): tap the line under the clock for a **timer dial** (hours, minutes, seconds; tap + / − or drag a column), then Start. Tap the timer's line while it runs to see the time left and **Stop** it early. Also from the Mac (Settings → Puck → Timer: any hours, minutes and seconds) and the puck's Settings → Timer → **Custom…**.
+- **Alarms** (firmware pb.7): up to four, set in Settings → Puck → Alarms or by voice. They ring on the puck (ALARM, the label, the time) and live in its memory, so **unplugging the puck clears them**.
+- **Voice commands for the puck:** say "timer 2 hours 15 minutes", "set a timer for 90 seconds", "stop the timer", "alarm 7:30 am", "wake me up at 6", "alarm in 20 minutes for tea" or "cancel my alarms". Only an utterance that is just one of these goes to the puck; everything else still goes to Claude. Settings → Claude → Voice turns it off.
+- **Hold to talk** (firmware pb.7, with the Cards, Dial or Compact list style): hold the face and speak; letting go sends. Tap-to-talk, tap-to-send still works. This replaces holding for the tabs (the clock's swipes reach them).
+- **Folded Claude Code projects show their sessions:** Puck Bridge reads Claude Code's own session files on the Mac (`~/.claude/projects`) for projects folded in Claude's sidebar, including which one is working (and a finish alert when it's done). Cloud sessions aren't there, and a title can differ a little from Claude's. Settings → Claude → Claude Code turns it off.
+- `firmware/sim/demo/{timer_dial,alarms,hold_talk,elapsed}.sim`.
 - **New puck navigation** (Puck Bridge firmware 0.0.88-pb.6, with the Cards, Dial or Compact list style): the clock is home; swipe down for notifications, up for settings, left for your **Claude Code groups**, left again for your chats; right goes back. Tap a group to see its sessions; tap a session to open it on the puck.
 - **Session status on the puck:** Claude Code rows show their pull request as Claude's sidebar does (**PR #9 merged** purple, **PR #12 open** green, **closed** red), or orange **Working · 1:23**, or **Reply ready**.
 - **Light mode** for the whole puck: Settings → Puck → **Appearance** (Dark, Light, Match Mac), or Settings → Appearance on the puck.
@@ -16,10 +22,13 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 - `firmware/sim/demo/lists_{cards,dial,compact}.sim`: each style on the chat list and five tabs (browsing sends nothing, a tap opens or switches).
 - `firmware/sim/demo/project_tabs.sim`: five tabs (Chats + four projects) on Puck Bridge firmware use the carousel, a browsed project is selected with the tab handshake and ✓ lands on its session.
 ### Changed
+- In the new navigation a **tap on the clock** opens the face of the chat you were on, or the chats list when the current group has none (it showed an empty "No chats here" face).
+- `firmware/sim/demo/lists_{cards,dial,compact}.sim` reach the groups by swiping, since holding the face now talks.
 - **Claude stays in the background:** opening a chat from the puck no longer brings Claude to the front (Settings → Claude → "Bring Claude to the front…" turns it back on). Voice is typed into Claude in the background; only if that doesn't take does Claude come forward for a moment, and then the app you were using comes back.
 - The puck's boot screen says **Puck Bridge** instead of "Harness".
 - **One puck tab per Claude Code project again** (owner's choice): hold the face → Chats, then each project as Claude's sidebar groups them, with its 16 newest sessions. The single Claude Code tab showed only the 16 newest sessions of all projects, so quieter projects never appeared.
 ### Fixed
+- **"Working" counts from when the turn started**, not from 0:00 when you open a chat on the puck (firmware pb.7 takes `elapsed` in `turn.started`; for a Claude Code session already working when it's opened, Puck Bridge reads the start from its session file).
 - **Folded projects** in Claude's Code sidebar now get a tab too, and keep the sessions Puck Bridge last saw (a folded project shows no sessions to read). Picking a folded project on the puck unfolds it in Claude; opening or speaking to one of its sessions unfolds it first. A project never unfolded since Puck Bridge started shows an empty tab until it's picked or unfolded once.
 
 ## [0.8.2] - 2026-10-14

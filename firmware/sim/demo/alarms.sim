@@ -1,0 +1,37 @@
+# Puck Bridge firmware pb.7: alarms. The Mac turns "7:30 am" into seconds (pb.alarm {id, in, label}); the puck holds up
+# to four in RAM (an unplug clears them), tells the Mac each one's state (pb.alarm.state, also after every welcome's
+# pb.sound), and one that comes due rings the timer's screen with ALARM, its label and the time. in 0 clears one.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+time +300
+boot tap
+expect view CLOCK
+mark
+in {"t":"pb.alarm","id":"a1","in":120,"label":"Stand-up"}
+expect out {"t":"pb.alarm.state","id":"a1","in":120,"label":"Stand-up"}
+in {"t":"pb.alarm","id":"a2","in":600,"label":"Laundry"}
+echo --- the welcome's pb.sound reports what the puck holds
+mark
+in {"t":"pb.sound","style":"chime","volume":60}
+expect out {"t":"pb.alarm.state","id":"a1"
+expect out {"t":"pb.alarm.state","id":"a2"
+echo --- a2 cleared: reported with in 0
+mark
+in {"t":"pb.alarm","id":"a2","in":0}
+expect out {"t":"pb.alarm.state","id":"a2","in":0
+echo --- a1 rings at its time, with the clock's time
+in {"t":"ambient","time":"7:30","ampm":"AM","date":"Wednesday, Oct 14","temp":"61°","cond":"Clear","hilo":"H 72°  L 55°","idleMin":5}
+mark
+time +121000
+expect view TIMER
+expect out {"t":"pb.alarm.state","id":"a1","in":0
+shot out/renders/alarm_ringing.png
+echo --- a touch stops it, and no pb.timer.done (that is the timer's)
+mark
+tap 233 233
+expect view CLOCK
+expect noout pb.timer.done

@@ -15,7 +15,9 @@ SHOTS = {   # README name: the render it comes from (nav.sim; nav_light.sim adds
     'clock': 'nav_01_clock', 'notifications': 'nav_02_notifications', 'settings': 'nav_03_settings',
     'groups': 'nav_04_groups', 'sessions': 'nav_07_group_sessions', 'face': 'nav_08_session_face',
     'chats': 'nav_09_chats', 'dial': 'nav_10_groups_dial', 'compact': 'nav_11_groups_compact', 'boot': 'nav_00_boot',   # dark only: the theme arrives after the Mac's welcome
+    'timer': 'timer_dial_set', 'timer-running': 'timer_dial_running', 'alarm': 'alarm_ringing',   # dark only (timer_dial.sim, alarms.sim)
 }
+DARK_ONLY = {'boot', 'timer', 'timer-running', 'alarm'}
 SIZE = 300
 
 def cut(src: Path, dst: Path):
@@ -30,6 +32,7 @@ def cut(src: Path, dst: Path):
 out.mkdir(parents=True, exist_ok=True)
 for theme, prefix in (('dark', ''), ('light', 'light_')):
     for name, render in SHOTS.items():
+        if theme == 'light' and name in DARK_ONLY: continue
         src = renders / f'{prefix}{render}.png'
         if src.exists():
             cut(src, out / f'{theme}-{name}.png')

@@ -364,7 +364,7 @@ index 4fa9182..24cccb4 100644
 +// muted or not, never while the microphone is open; the chosen sound and volume are left as they were.
 +void audio_notify_preview_sound(const char *style, int volume);
 diff --git a/devices/harness-device/firmware/main/cable_client.c b/devices/harness-device/firmware/main/cable_client.c
-index a2aadaa..cbc15d6 100644
+index a2aadaa..a19dc61 100644
 --- a/devices/harness-device/firmware/main/cable_client.c
 +++ b/devices/harness-device/firmware/main/cable_client.c
 @@ -12,6 +12,7 @@
@@ -385,7 +385,7 @@ index a2aadaa..cbc15d6 100644
  } cable_agent_t;
  
  
-@@ -329,6 +333,16 @@ static void send_hello(void)
+@@ -329,6 +333,17 @@ static void send_hello(void)
      // Custom pets: the newest pack version this build reads (2: a pack may carry a relaxing scene, pet_store.c; it
      // still reads 1), and these packs are already held, so the daemon sends only what is missing.
      msg_number(&root, "pets", 2);
@@ -398,11 +398,12 @@ index a2aadaa..cbc15d6 100644
 +    // 4: + `pb.ui {lists}` (the list style: classic, cards, dial, compact) and the swarms' `working` counts.
 +    // 5: + the clock-home navigation with the new lists, the Claude Code groups page, agents' `status` / `tone`,
 +    // `pb.ui {theme: dark|light}`, the settings as cards and up to 12 settings rows.
-+    msg_number(&root, "pb", 5);
++    // 6: + `turn.started.elapsed`, `pb.timerset` (the timer dial), `pb.alarm` / `pb.alarm.state`, hold-to-talk.
++    msg_number(&root, "pb", 6);
      {
          char held[PET_STORE_MAX_PACKS][17];
          const size_t n = pet_store_held(held, PET_STORE_MAX_PACKS);
-@@ -401,6 +415,44 @@ void cable_client_send_focus(const char *agent_id)
+@@ -401,6 +416,53 @@ void cable_client_send_focus(const char *agent_id)
      send_json(root);
  }
  
@@ -437,6 +438,15 @@ index a2aadaa..cbc15d6 100644
 +    send_json(root);
 +}
 +
++// pb 6: one alarm's state, `in` seconds to go (0: gone — it rang, was stopped or removed).
++void cable_client_pb_alarm_state(const char *id, int in, const char *label)
++{
++    cJSON *root = msg("pb.alarm.state");
++    msg_string(&root, "id", id ? id : "");
++    msg_number(&root, "in", in);
++    msg_string(&root, "label", label ? label : "");
++    send_json(root);
++}
 +void cable_client_pb_timer_done(const char *reason)
 +{
 +    cJSON *root = msg("pb.timer.done");
@@ -447,7 +457,7 @@ index a2aadaa..cbc15d6 100644
  void cable_client_send_open(const char *agent_id, const char *reason)
  {
      if (!agent_id || !agent_id[0]) return;
-@@ -832,6 +884,9 @@ int cable_client_list_agents_snapshot(project_t *out, int max, cable_agent_snaps
+@@ -832,6 +894,9 @@ int cable_client_list_agents_snapshot(project_t *out, int max, cable_agent_snaps
          snprintf(out[n].engine, sizeof(out[n].engine), "%s", s_agents[i].engine);
          snprintf(out[n].machine_id, sizeof(out[n].machine_id), "%s", s_agents[i].machine_id);
          snprintf(out[n].machine, sizeof(out[n].machine), "%s", s_agents[i].machine);
@@ -457,7 +467,7 @@ index a2aadaa..cbc15d6 100644
  
          // The [mark][Model][Effort] chip row reads ONE shape — the opaque runtime-v1 profile — so the
          // daemon's plain model/effort are assembled into it here rather than teaching the UI a second
-@@ -881,6 +936,8 @@ static void handle_swarms(const cJSON *p)
+@@ -881,6 +946,8 @@ static void handle_swarms(const cJSON *p)
          // before tiles were counted separately.
          const cJSON *panes = cJSON_GetObjectItemCaseSensitive(it, "panes");
          rows[n].panes = cJSON_IsNumber(panes) ? (panes->valueint > 0 ? panes->valueint : 0) : rows[n].agents;
@@ -466,7 +476,7 @@ index a2aadaa..cbc15d6 100644
          n++;
      }
      const char *selected = str_of(p, "selected");
-@@ -998,6 +1055,11 @@ static void handle_agent(const cJSON *p)
+@@ -998,6 +1065,11 @@ static void handle_agent(const cJSON *p)
              snprintf(a->machine_id, sizeof(a->machine_id), "%s", machine_id);
          const char *machine = str_of(p, "machine");
          if (machine) snprintf(a->machine, sizeof(a->machine), "%s", machine);
@@ -478,7 +488,7 @@ index a2aadaa..cbc15d6 100644
  
      }
      xSemaphoreGive(s_agents_lock);
-@@ -1215,6 +1277,75 @@ static void handle_pet_map(const cJSON *p)
+@@ -1215,6 +1287,90 @@ static void handle_pet_map(const cJSON *p)
      ui_pets_changed();
  }
  
@@ -530,6 +540,7 @@ index a2aadaa..cbc15d6 100644
 +static void handle_pb_sound(const cJSON *p)
 +{
 +    ui_pb_host();
++    ui_pb_alarms_resend();   // pb 6: the host sends pb.sound after every welcome; tell it the alarms this puck holds
 +    audio_notify_set_sound(str_of(p, "style"), int_of(p, "volume", 0, 100, -1));
 +    if (bool_of(p, "test")) audio_notify_preview();
 +}
@@ -544,6 +555,20 @@ index a2aadaa..cbc15d6 100644
 +    if (theme) ui_pb_theme(!strcmp(theme, "light"));
 +}
 +
++// `pb.timerset` (pb 6): open the puck's timer dial on `seconds`. `pb.alarm` (pb 6): an alarm `in` seconds from now
++// (the Mac turns "7:30 am" into seconds; the puck counts on its own clock and holds alarms in RAM, so unplugging
++// clears them), `in` 0 removes alarm `id`.
++static void handle_pb_timerset(const cJSON *p)
++{
++    ui_pb_host();
++    ui_pb_timerset(int_of(p, "seconds", 0, 24 * 3600 - 1, 0));
++}
++static void handle_pb_alarm(const cJSON *p)
++{
++    ui_pb_host();
++    ui_pb_alarm(str_of(p, "id"), int_of(p, "in", 0, 7 * 86400, 0), str_of(p, "label"));
++}
++
 +// `pb.timer` (pb 3): start or replace the puck's countdown, `seconds` 0 cancels it; `label` is optional.
 +static void handle_pb_timer(const cJSON *p)
 +{
@@ -554,7 +579,7 @@ index a2aadaa..cbc15d6 100644
  static void handle_message(const cJSON *root)
  {
      const char *t = str_of(root, "t");
-@@ -1248,6 +1379,11 @@ static void handle_message(const cJSON *root)
+@@ -1248,6 +1404,13 @@ static void handle_message(const cJSON *root)
      if (strcmp(t, "settings.set") == 0) { handle_settings_set(p); return; }
      if (strcmp(t, "models") == 0) { handle_models(p); return; }
      if (strcmp(t, "swarms") == 0) { handle_swarms(p); return; }
@@ -562,11 +587,13 @@ index a2aadaa..cbc15d6 100644
 +    if (strcmp(t, "pb.menu") == 0) { handle_pb_menu(p); return; }
 +    if (strcmp(t, "pb.sound") == 0) { handle_pb_sound(p); return; }
 +    if (strcmp(t, "pb.ui") == 0) { handle_pb_ui(p); return; }
++    if (strcmp(t, "pb.timerset") == 0) { handle_pb_timerset(p); return; }
++    if (strcmp(t, "pb.alarm") == 0) { handle_pb_alarm(p); return; }
 +    if (strcmp(t, "pb.timer") == 0) { handle_pb_timer(p); return; }
  
      if (strcmp(t, "agent.updated") == 0) {
          // One agent changed. Cheapest correct answer is to re-ask: the daemon is on the other end of a
-@@ -1262,8 +1398,12 @@ static void handle_message(const cJSON *root)
+@@ -1262,8 +1425,12 @@ static void handle_message(const cJSON *root)
      if (agent_id && strnlen(agent_id, ID_MAX) >= ID_MAX) { s_bad++; return; }
  
      if (strcmp(t, "focus") == 0) {
@@ -581,16 +608,21 @@ index a2aadaa..cbc15d6 100644
          return;
      }
      // One line per turn-state message. This is the seam where "the daemon sent it" and "the tile moved"
-@@ -1277,6 +1417,8 @@ static void handle_message(const cJSON *root)
+@@ -1277,7 +1444,13 @@ static void handle_message(const cJSON *root)
          // is waiting on. Dropping it left the tile holding a live turn with nothing on screen that said so,
          // which reads exactly like the turn never started.
          const char *text = str_of(p, "text");
 +        // A turn that starts LEAVES THE CLOCK UP (Puck Bridge pb.2, owner's pick G2): its segment in the clock's
 +        // ring turns orange instead. The finished turn's summary still rings and takes the face back (below).
          if (agent_id) ui_project_emit(agent_id, "", "processing", text ? text : "", NULL);
++        // Puck Bridge (pb 6): how long this turn has already run, so a chat that has worked 18 minutes doesn't count
++        // from 0:00 on a puck that only just heard of it.
++        int elapsed = int_of(p, "elapsed", 0, 7 * 86400, 0);
++        if (agent_id && elapsed > 0) ui_project_busy_since(agent_id, elapsed);
          return;
      }
-@@ -1320,6 +1462,7 @@ static void handle_message(const cJSON *root)
+     if (strcmp(t, "turn.activity") == 0) {
+@@ -1320,6 +1493,7 @@ static void handle_message(const cJSON *root)
          // it: they are reading the last one, not watching for the next to end, and three tones is how
          // they learn a task is done without moving their eyes.
          audio_notify_done();
@@ -599,7 +631,7 @@ index a2aadaa..cbc15d6 100644
          // waking a dark panel, filing an entry in the drawer — and `quiet` is the daemon saying the
          // desktop window already has this agent on screen. The tile itself is still redrawn above: the
 diff --git a/devices/harness-device/firmware/main/cable_client.h b/devices/harness-device/firmware/main/cable_client.h
-index 3303ae8..610655b 100644
+index 3303ae8..a4a3571 100644
 --- a/devices/harness-device/firmware/main/cable_client.h
 +++ b/devices/harness-device/firmware/main/cable_client.h
 @@ -46,6 +46,11 @@ typedef struct {
@@ -623,7 +655,7 @@ index 3303ae8..610655b 100644
  } cable_swarm_t;
  
  /*
-@@ -241,6 +248,16 @@ void cable_client_send_focus(const char *agent_id);
+@@ -241,6 +248,17 @@ void cable_client_send_focus(const char *agent_id);
  // unanswered question, and each used to open a tab).
  void cable_client_send_open(const char *agent_id, const char *reason);
  
@@ -636,6 +668,7 @@ index 3303ae8..610655b 100644
 +// ("stopped": a person stopped the alarm, "timeout": it rang out unanswered).
 +void cable_client_pb_timer_state(int seconds);
 +void cable_client_pb_timer_done(const char *reason);
++void cable_client_pb_alarm_state(const char *id, int in, const char *label);
 +
  // One report of a finger on the glass, on its way to the window on the computer.
  //
@@ -695,7 +728,7 @@ index 983a291..315a4cb 100644
 +// True while the panel is off because its own idle timer turned it off — not PWR, not a held button.
 +bool display_idle_slept(void);
 diff --git a/devices/harness-device/firmware/main/ui/habitat/character_types.h b/devices/harness-device/firmware/main/ui/habitat/character_types.h
-index 3487bba..8f2ecf8 100644
+index 3487bba..e0ad7f1 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/character_types.h
 +++ b/devices/harness-device/firmware/main/ui/habitat/character_types.h
 @@ -59,6 +59,9 @@ typedef struct {
@@ -703,7 +736,7 @@ index 3487bba..8f2ecf8 100644
      uint16_t notices;
      uint16_t ink, foreground, dim;
 +    // Focus only, Puck Bridge (pb 3): the face is one of the side pages, so its tips teach those (1), and this is
-+    // the first pane, the clock one swipe right (2). 0: the official tips.
++    // the first pane, the clock one swipe right (2), or (pb 6) the clock-home navigation's face (3). 0: the official tips.
 +    uint8_t pages;
  } ht_character_face_t;
  
@@ -761,10 +794,10 @@ index b6e62b2..f734c8d 100644
          }
          render_progress(RENDER_HEALTH);
 diff --git a/devices/harness-device/firmware/main/ui/habitat/focus.c b/devices/harness-device/firmware/main/ui/habitat/focus.c
-index 14cbc03..7a75b9e 100644
+index 14cbc03..40ae474 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/focus.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/focus.c
-@@ -96,6 +96,39 @@ static const char *const RELAXING[] = {
+@@ -96,6 +96,56 @@ static const char *const RELAXING[] = {
      TAP_NAME, TAP_NAME, TAP_NAME, TAP_NAME, TAP_NAME,
      "What's next?", "Your move", "Say the word", "Ask away",
  };
@@ -800,25 +833,42 @@ index 14cbc03..7a75b9e 100644
 +    HOLD_TABS, HOLD_TABS, HOLD_TABS, HOLD_TABS, PB_UP_SHORT, PB_UP_SHORT, PB_UP_SHORT, PB_UP_SHORT,
 +    "What's next?", "Your move", "Ask away",
 +};
++/*
++ * THE CLOCK-HOME FACE'S TIPS (pb 6, pages 3): the face is reached from a list, holding talks, and right goes back.
++ */
++#define HOLD_TO_TALK "Hold to talk"
++#define PB_BACK "Swipe right for your list"
++#define PB_BACK_SHORT "Swipe right for list"
++static const char *const PB_NAV_RESTING[] = {
++    "What's next?", "Ready when you are", "Say the word",
++    TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK, TAP_TO_TALK,
++    HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK,
++    PB_BACK, PB_BACK, PB_BACK, PB_BACK,
++};
++static const char *const PB_NAV_RELAXING[] = {
++    TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK, TAP_TALK,
++    HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK, HOLD_TO_TALK,
++    PB_BACK_SHORT, PB_BACK_SHORT, PB_BACK_SHORT, PB_BACK_SHORT, "What's next?", "Your move", "Ask away",
++};
 +#define PICK(list) pick_line(f, list, sizeof list / sizeof list[0])
  static struct {
      bool showing;           // the last home face drawn was a resting one
      char who[64];           // ... for this recipient
-@@ -121,11 +154,11 @@ static const char *pick_line(const ht_character_face_t *f, const char *const *li
+@@ -121,11 +171,11 @@ static const char *pick_line(const ht_character_face_t *f, const char *const *li
  }
  static const char *resting_line(const ht_character_face_t *f)
  {
 -    return pick_line(f, RESTING, sizeof RESTING / sizeof RESTING[0]);
-+    return f->pages == 2 ? PICK(PB_RESTING_FIRST) : f->pages ? PICK(PB_RESTING) : PICK(RESTING);
++    return f->pages == 3 ? PICK(PB_NAV_RESTING) : f->pages == 2 ? PICK(PB_RESTING_FIRST) : f->pages ? PICK(PB_RESTING) : PICK(RESTING);
  }
  static const char *relaxing_line(const ht_character_face_t *f)
  {
 -    return pick_line(f, RELAXING, sizeof RELAXING / sizeof RELAXING[0]);
-+    return f->pages == 2 ? PICK(PB_RELAXING_FIRST) : f->pages ? PICK(PB_RELAXING) : PICK(RELAXING);
++    return f->pages == 3 ? PICK(PB_NAV_RELAXING) : f->pages == 2 ? PICK(PB_RELAXING_FIRST) : f->pages ? PICK(PB_RELAXING) : PICK(RELAXING);
  }
  
  /*
-@@ -496,6 +529,49 @@ static uint32_t scene_next_ms(const ht_pet_scene_t *sc, unsigned level, uint32_t
+@@ -496,6 +546,49 @@ static uint32_t scene_next_ms(const ht_pet_scene_t *sc, unsigned level, uint32_t
      return 0;
  }
  
@@ -2389,7 +2439,7 @@ index d0ba7f5..6f41d79 100644
  bool ht_text(ht_scene_t *scene, int x, int y, int width, const ht_font_t *font, uint16_t fg,
               uint16_t bg, const char *text);
 diff --git a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
-index f3c3fa2..55e27c0 100644
+index f3c3fa2..7fbf121 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 @@ -15,6 +15,7 @@
@@ -2400,7 +2450,7 @@ index f3c3fa2..55e27c0 100644
  #ifdef DEVICE_CREATURE_GALLERY
  #include "creature_gallery.h"
  static ht_gallery_t gallery;
-@@ -90,7 +91,12 @@ typedef enum {
+@@ -90,7 +91,13 @@ typedef enum {
      STOP,
      MODELS,
      MESSAGE,
@@ -2410,11 +2460,12 @@ index f3c3fa2..55e27c0 100644
 +    PBMENU,    // Puck Bridge: the settings list the Mac sends (pb.menu)
 +    PICKER,    // Puck Bridge: one settings row's choices, paged (pb.menu "choices")
 +    TIMER,     // Puck Bridge: the timer rang (pb.timer); any touch or the small button stops it
-+    GROUPS     // Puck Bridge (pb 5): the Claude Code groups (the host's code-* tabs), left of the clock
++    GROUPS,    // Puck Bridge (pb 5): the Claude Code groups (the host's code-* tabs), left of the clock
++    TIMERSET   // Puck Bridge (pb 6): the timer dial (hours, minutes, seconds; Start, Stop)
  } view_t;
  typedef enum {
      A_NONE,
-@@ -128,7 +134,12 @@ typedef enum {
+@@ -128,7 +135,14 @@ typedef enum {
      A_SELECT_BEGIN, A_SELECT_FIND, A_SELECT_EXTEND, A_SELECT_SEND, A_RETURN, A_LATEST, A_VISIT_SEND,
      A_CARRY, A_CARRY_DROP, A_CARRY_SEND,
      A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
@@ -2424,11 +2475,13 @@ index f3c3fa2..55e27c0 100644
 +    A_PB_PICK, A_PB_CHOOSE, A_PB_BACK,  // the picker: page to a choice, choose it, leave without choosing
 +    A_PB_TIMER_STATE, A_PB_TIMER_DONE,  // the worker's: pb.timer.state (seconds: value), pb.timer.done (reason: text)
 +    A_GROUP, A_PB_GROUPS, A_PB_CHATS,   // pb 5: a group tapped (id: its tab), the groups list, the chats list
-+    A_PB_INBOX                          // pb 5: the notifications, from the clock
++    A_PB_INBOX,                         // pb 5: the notifications, from the clock
++    A_PB_SET_OPEN, A_PB_SET_ADJ, A_PB_SET_GO, A_PB_SET_STOP,   // pb 6: the timer dial (ADJ value: column * 2 + up)
++    A_PB_ALARM_STATE                    // pb 6, the worker's: pb.alarm.state (id, value: seconds to go, text: label)
  } action_kind_t;
  typedef struct {
      action_kind_t kind;
-@@ -155,6 +166,8 @@ typedef struct {
+@@ -155,6 +169,8 @@ typedef struct {
      // The row receives the same bounded result stored in pane memory. Keeping
      // an unused 4 KB tail here wasted RAM and enlarged every roster swap.
      char preview[240], full[PANE_RESULT_BYTES], tool[100];
@@ -2437,7 +2490,7 @@ index f3c3fa2..55e27c0 100644
      bool busy, has_event, recap_ready;
      uint32_t busy_ms, last_busy;
      int tokens;
-@@ -246,6 +259,74 @@ static EXT_RAM_BSS_ATTR struct {
+@@ -246,6 +262,88 @@ static EXT_RAM_BSS_ATTR struct {
      int start_x, start_y, last_x, last_y;
      uint32_t touch_started;
  } s;
@@ -2488,7 +2541,19 @@ index f3c3fa2..55e27c0 100644
 +    uint32_t list_sec;
 +    // pb 5: a group or the chats were chosen from the groups list; their list (not the face) opens when it lands.
 +    bool land_list;
++    // pb 6: the timer dial's hours, minutes and seconds, and a drag on one of its columns (dial_drag px so far).
++    int set_h, set_m, set_s, dial_drag;
++    bool dial_dragged;
++    // pb 6: hold-to-talk — voice started by a held finger (its release sends), and a release that came before the
++    // microphone was recording (it sends once it is).
++    bool ptt, ptt_stop;
 +} pb = {.idle_min = 5, .count = -1};
++/*
++ * PUCK BRIDGE'S ALARMS (pb 6): up to four, each `in` seconds from when the Mac set it, counted on esp_timer like the
++ * timer, held in RAM (owner: unplugging clears them). One that comes due rings the timer's alarm screen.
++ */
++#define PB_ALARMS 4
++static struct { char id[8]; char label[PB_TEXT]; int64_t at_us; bool on; } pba[PB_ALARMS];
 +enum { PB_LISTS_CLASSIC, PB_LISTS_CARDS, PB_LISTS_DIAL, PB_LISTS_COMPACT };
 +
 +// The rows' choices: 10 x 16 x 41 B = 6.4 KB, in PSRAM with the rest of the big model.
@@ -2508,11 +2573,13 @@ index f3c3fa2..55e27c0 100644
 +    uint32_t ring_started, next_ring, reported;   // ms(): when it rang, its next sound, the last pb.timer.state
 +    int shown;                   // the seconds last drawn, so the clock redraws once a second
 +    view_t back;                 // where a stopped alarm returns
++    bool alarm;                  // pb 6: what rings is an alarm (its label in ring_label), not the timer
++    char ring_label[PB_TEXT];
 +} pbt;
  static QueueHandle_t actions;
  static _Atomic(TaskHandle_t) reload_waiter;
  static atomic_bool reload_requested;
-@@ -255,7 +336,8 @@ static ht_selection_t selection;
+@@ -255,7 +353,8 @@ static ht_selection_t selection;
  static ht_workspace_t workspace;
  static ht_tab_carousel_t tab_carousel;
  static ht_tab_carousel_t pane_carousel;   // Focus's pane picker, the same pages as the tabs (design 2026-10-06)
@@ -2522,7 +2589,7 @@ index f3c3fa2..55e27c0 100644
  static ht_carry_t carry;
  static ht_visit_t visit;
  static ht_form_t form;
-@@ -263,6 +345,20 @@ static ht_draft_t draft;
+@@ -263,6 +362,20 @@ static ht_draft_t draft;
  static bool selection_emit(const ht_select_command_t *command, void *ctx);
  static ht_gesture_t gesture;
  static ht_character_t character;
@@ -2543,7 +2610,7 @@ index f3c3fa2..55e27c0 100644
  static ht_character_id_t device_skin, desktop_companion = HT_CHARACTER_COUNT;
  static bool follow_companion = true, companion_celebrating;
  /*
-@@ -289,6 +385,17 @@ static ht_character_caption_t home_caption;
+@@ -289,6 +402,18 @@ static ht_character_caption_t home_caption;
  static action_t pressed_action;
  static bool queue(action_t a);
  static void view(view_t v);
@@ -2552,6 +2619,7 @@ index f3c3fa2..55e27c0 100644
 +static int pb_timer_left(void);
 +static void pb_timer_text(char *dst, size_t cap, int seconds);
 +static void pb_timer_silence(const char *reason, bool report);
++static void pb_timer_set(int seconds, const char *label);
 +static bool pb_tabs(void);
 +static void pb_styled_list(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map,
 +                           action_kind_t pick);
@@ -2561,7 +2629,7 @@ index f3c3fa2..55e27c0 100644
  static const char *voice_status(void);
  static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
  static void copy(char *dst, size_t cap, const char *src)
-@@ -297,7 +404,10 @@ static void copy(char *dst, size_t cap, const char *src)
+@@ -297,11 +422,27 @@ static void copy(char *dst, size_t cap, const char *src)
          return;
      if (!src)
          src = "";
@@ -2573,7 +2641,24 @@ index f3c3fa2..55e27c0 100644
      memmove(dst, src, n);
      dst[n] = 0;
  }
-@@ -556,6 +666,7 @@ static void view(view_t v)
+ #define COPY(dst, src) copy(dst, sizeof(dst), src)
++// copy() that never leaves half a UTF-8 character at the cut
++static void pb_copy(char *dst, size_t cap, const char *src)
++{
++    copy(dst, cap, src);
++    size_t n = strlen(dst), k = n;
++    while (k && ((unsigned char)dst[k - 1] & 0xc0) == 0x80) k--;
++    if (k && (unsigned char)dst[k - 1] >= 0xc0) {
++        unsigned char lead = (unsigned char)dst[k - 1];
++        size_t need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
++        if (n - (k - 1) < need) dst[k - 1] = 0;
++    }
++}
++#define PB_COPY(dst, src) pb_copy(dst, sizeof(dst), src)
+ static void recap_preview(char *dst, size_t cap, const char *src)
+ {
+     if (!cap)
+@@ -556,6 +697,7 @@ static void view(view_t v)
      if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
      input_cancel();
      s.voice_retry_until = 0;
@@ -2581,7 +2666,7 @@ index f3c3fa2..55e27c0 100644
      s.view = v;
      s.offset = 0;
      s.pressed = -1;
-@@ -602,7 +713,9 @@ static void tab_request(const char *id, bool browsing)
+@@ -602,7 +744,9 @@ static void tab_request(const char *id, bool browsing)
      if (!queue(a)) { workspace_failed("Device busy. Choose the tab again."); return; }
      ht_visit_close(&visit); s.pending_focus[0]=0;
      s.loading=true;
@@ -2592,7 +2677,7 @@ index f3c3fa2..55e27c0 100644
          COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
          view(MESSAGE);
      }
-@@ -610,7 +723,8 @@ static void tab_request(const char *id, bool browsing)
+@@ -610,7 +754,8 @@ static void tab_request(const char *id, bool browsing)
  }
  static void tabs_sync(void)
  {
@@ -2602,7 +2687,7 @@ index f3c3fa2..55e27c0 100644
      int index=ht_tab_carousel_index(&tab_carousel);
      if (index>=0 && index<s.tab_count) tab_request(s.tabs[index].id,true);
  }
-@@ -851,13 +965,14 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
+@@ -851,13 +996,14 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
  static void render_brand(ht_scene_t *f)
  {
      if (character.id == HT_CHARACTER_FOCUS) {
@@ -2622,7 +2707,26 @@ index f3c3fa2..55e27c0 100644
  }
  static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                      int value, bool enabled)
-@@ -991,6 +1106,11 @@ static void surface_tick(uint32_t now)
+@@ -979,6 +1125,18 @@ static uint32_t status_wake_ms(uint32_t now)
+     return (ht_shimmer_wake_ms(now * speed) + speed - 1) / speed;
+ }
+ static void dispatch(action_t a);   // the hold below acts at once; defined with the other actions
++static action_t make_action(hit_t h);
++enum { PB_PTT_MS = 450, PB_PTT_TAP_MS = 900 };
++// pb 6: a hold-to-talk release that came before the microphone was recording sends once it is.
++static void pb_ptt_tick(void)
++{
++    if (!pb.ptt_stop) return;
++    if (!s.voice_open || s.view != VOICE) { pb.ptt_stop = false; return; }
++    if (!s.voice_start_pending && !s.voice_waiting && audio_client_recording()) {
++        pb.ptt_stop = false;
++        dispatch((action_t){.kind = A_VOICE_STOP});
++    }
++}
+ static void surface_tick(uint32_t now)
+ {
+     notice_flush_reads(now);
+@@ -991,6 +1149,11 @@ static void surface_tick(uint32_t now)
      }
      if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && !display_is_asleep() &&
          ht_tab_carousel_tick(&pane_carousel, now)) change();
@@ -2634,7 +2738,7 @@ index f3c3fa2..55e27c0 100644
      if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && !display_is_asleep() &&
          ht_tab_carousel_tick(&inbox_carousel, now)) {
          s.offset = ht_tab_carousel_index(&inbox_carousel);   // the page it settles on, rendered or not
-@@ -1002,6 +1122,11 @@ static void surface_tick(uint32_t now)
+@@ -1002,6 +1165,11 @@ static void surface_tick(uint32_t now)
      // The voice screen's listening scene runs while the finger is down (hold-to-talk); the pets do not.
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE) &&
          (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
@@ -2646,7 +2750,31 @@ index f3c3fa2..55e27c0 100644
      bool main = s.view == HOME || s.view == AGENT;
      bool visible = !display_is_asleep() &&
          ((main && s.connected && !s.loading) || s.view == VOICE);
-@@ -1108,10 +1233,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
+@@ -1013,7 +1181,22 @@ static void surface_tick(uint32_t now)
+         s.touch_down && !s.touch_cancelled && gesture.live && !gesture.moved && !gesture.guarded &&
+         pressed_action.kind == A_PET && held >= 650 && held <= 1800;
+     if (review_preview != s.voice_review_preview) { s.voice_review_preview = review_preview; change(); }
+-    if (visible && main && s.touch_down && !s.touch_cancelled && gesture.live && !gesture.guarded &&
++    if (pb_nav() && character.id == HT_CHARACTER_FOCUS) {
++        /*
++         * HOLD TO TALK (pb 6; it replaces hold-for-tabs, which the clock's swipes made redundant): a still finger on
++         * the face for PB_PTT_MS starts voice for the chat on it, and its release (habitat_touch) sends. A release
++         * inside PB_PTT_TAP_MS of the touch is a slow tap instead: the microphone stays open, a tap sends.
++         */
++        if (visible && main && s.touch_down && !s.touch_cancelled && gesture.live && !gesture.guarded &&
++            pressed_action.kind == A_PET && !gesture.moved && held >= PB_PTT_MS && !pb.ptt && active()) {
++            ht_gesture_guard(&gesture, now);
++            ESP_LOGI("habitat", "focus hold: start voice (hold to talk)");
++            dispatch(make_action((hit_t){.action = A_VOICE}));
++            pb.ptt = s.view == VOICE;
++            pb.ptt_stop = false;
++            return;
++        }
++    } else if (visible && main && s.touch_down && !s.touch_cancelled && gesture.live && !gesture.guarded &&
+         pressed_action.kind == A_PET && !gesture.moved && held >= 650 && held < 5000) {
+         // Enter directly. The opening contact is consumed until a real release,
+         // so lifting or sliding after the hold cannot also select a tab.
+@@ -1108,10 +1291,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
              HT_LV_BELL);
      ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, bell_y + (h - cf->height) / 2, cw, cf, ink, blue, text);
  }
@@ -2659,7 +2787,7 @@ index f3c3fa2..55e27c0 100644
      if (!s.connected || s.loading) { render_brand(f); return; }
      if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
      agent_t *a = active();
-@@ -1142,7 +1269,9 @@ static void render_home(ht_scene_t *f)
+@@ -1142,7 +1327,9 @@ static void render_home(ht_scene_t *f)
       * name still — see ht_character_face_t.
       */
      bool rotating = home_caption_rotates() && character.id != HT_CHARACTER_FOCUS;
@@ -2670,17 +2798,17 @@ index f3c3fa2..55e27c0 100644
      bool bell = !s.voice_retry_until && !carry.active && !carry.error[0] && !visit.available;
      unsigned unread = notice_unread(a ? a->id : NULL);
      bell = bell && unread > 0;
-@@ -1177,7 +1306,8 @@ static void render_home(ht_scene_t *f)
+@@ -1177,7 +1364,8 @@ static void render_home(ht_scene_t *f)
          .straight_title = s.straight_title,
          .footer_action = carry.active || carry.error[0] || visit.available,
          .ink = FG, .foreground = FG, .dim = DIM,
 -        .primary_title = true, .roomy_reading = true};
 +        .primary_title = true, .roomy_reading = true,
-+        .pages = (uint8_t)(!pb.host ? 0 : s.active == 0 ? 2 : 1)};
++        .pages = (uint8_t)(!pb.host ? 0 : pb_nav() ? 3 : s.active == 0 ? 2 : 1)};
      char carried[128];
      if (carry.active) {
          snprintf(carried,sizeof(carried),"%d line%s from %.70s",carry.rows,carry.rows==1?"":"s",carry.source);
-@@ -1193,6 +1323,12 @@ static void render_home(ht_scene_t *f)
+@@ -1193,6 +1381,12 @@ static void render_home(ht_scene_t *f)
      }
      ht_character_face(f, &character, &f_, ACCENT, recap);
      s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
@@ -2693,7 +2821,7 @@ index f3c3fa2..55e27c0 100644
      // The working face says it with the pet's bell bubble; every other face keeps the pill at 400.
      ht_rect_t bubble = {0};
      bool told = bell && focus_face && ht_focus_alert_shown(&f_, recap, &bubble);
-@@ -1334,7 +1470,10 @@ static const char *pane_label(int i)
+@@ -1334,7 +1528,10 @@ static const char *pane_label(int i)
  static void render_focus_panes(ht_scene_t *f)
  {
      uint16_t fg = color(0xeaeaf0), pressed_fill = color(0x30333f);   // the Choose-a-tab pill's ink and press
@@ -2705,7 +2833,7 @@ index f3c3fa2..55e27c0 100644
      if (!s.count) {
          /*
           * NO PANES (design 2026-10-06, focus-project.html "Panes, none"): "No panes in / this tab." on two Inter 44
-@@ -1363,7 +1502,15 @@ static void render_focus_panes(ht_scene_t *f)
+@@ -1363,7 +1560,15 @@ static void render_focus_panes(ht_scene_t *f)
      // that comes or goes keeps them in step. Done (green, at the foot) and a tap on the chosen page open it.
      if (pane_carousel.count != s.count)
          ht_tab_carousel_reset(&pane_carousel, s.count, s.active >= 0 && s.active < s.count ? s.active : 0);
@@ -2721,7 +2849,7 @@ index f3c3fa2..55e27c0 100644
      ht_text(f, (HT_WIDTH - ht_done_28.width) / 2, 400, ht_done_28.width, &ht_done_28,
              s.connected ? color(HT_THEME_VOICE) : DIM, BG, HT_DONE);
      s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_AGENT, ht_tab_carousel_index(&pane_carousel), s.connected};
-@@ -1519,6 +1666,11 @@ static int settings_count(void)
+@@ -1519,6 +1724,11 @@ static int settings_count(void)
      while (settings_item(count, NULL)) count++;
      return count;
  }
@@ -2733,7 +2861,7 @@ index f3c3fa2..55e27c0 100644
  static void tabs_move(int dy)
  {
      // Move by one name while the finger is down, rather than paging by three
-@@ -1527,7 +1679,8 @@ static void tabs_move(int dy)
+@@ -1527,7 +1737,8 @@ static void tabs_move(int dy)
      int step = s.tab_drag / TAB_ROW_HEIGHT;
      if (!step) return;
      s.tab_drag %= TAB_ROW_HEIGHT;
@@ -2743,7 +2871,7 @@ index f3c3fa2..55e27c0 100644
      int last = count > TAB_ROWS ? count - TAB_ROWS : 0;
      int next = s.offset + step;
      if (next < 0) next = 0;
-@@ -1683,8 +1836,323 @@ static void render_focus_tabs(ht_scene_t *f)
+@@ -1683,8 +1894,323 @@ static void render_focus_tabs(ht_scene_t *f)
      }
      focus_carousel(f, &tab_carousel, s.tab_count, tab_label, A_TAB);
  }
@@ -3067,7 +3195,7 @@ index f3c3fa2..55e27c0 100644
      // Done is shared by every face, with the same generous bottom-edge target; green on Focus (design 2026-10-06).
      ht_text(f, (HT_WIDTH-ht_done_28.width)/2, 400, ht_done_28.width, &ht_done_28,
              character.id == HT_CHARACTER_FOCUS ? color(HT_THEME_VOICE) : FG, BG, HT_DONE);
-@@ -2047,6 +2515,422 @@ static void render_draft_options(ht_scene_t *f)
+@@ -2047,6 +2573,484 @@ static void render_draft_options(ht_scene_t *f)
      control(f, FACE_CX(336), 323, 336, "Back to draft", A_DRAFT_BACK, 0, true);
      center(f, 380, draft.page.locked ? "Check terminal" : "Nothing sent yet", DIM);
  }
@@ -3403,19 +3531,81 @@ index f3c3fa2..55e27c0 100644
 +    const int c16 = HT_WIDTH * 8;
 +    bool lit = (ms() - pbt.ring_started) / 1000 % 2 == 0;
 +    ht_ring_arc(f, c16, c16, CLOCK_RING_R * 16, CLOCK_RING_W * 16, 90, 180, color(lit ? PB_INK_BUSY : PB_INK_IDLE));
-+    focus_header(f, "TIMER");
++    focus_header(f, pbt.alarm ? "ALARM" : "TIMER");
 +    const ht_font_t *big = &ht_lv_inter_44.base, *mid = &ht_lv_inter_25.base, *digits = &ht_lv_pb_time.base;
-+    focus_put(f, 40, 92, HT_WIDTH - 80, big, FG, BG, "Time's up", true);
-+    char label[PB_TEXT];
-+    pb_clean(label, sizeof label, pbt.label, mid);
++    focus_put(f, 40, 92, HT_WIDTH - 80, big, FG, BG, pbt.alarm ? "Alarm" : "Time's up", true);
++    char label[PB_TEXT], big_text[24];
++    pb_clean(label, sizeof label, pbt.ring_label, mid);
 +    focus_put(f, 40, 148, HT_WIDTH - 80, mid, DIM, BG, label, true);
-+    int w = ht_measure(digits, "0:00");
-+    ht_text(f, (HT_WIDTH - w) / 2, 194, w, digits, color(PB_INK_BUSY), BG, "0:00");
++    // An alarm shows the time it is (the Mac's clock string, pb.time); the timer its 0:00.
++    pb_clean(big_text, sizeof big_text, pbt.alarm && pb.seen && pb.time[0] ? pb.time : "0:00", digits);
++    int w = ht_measure(digits, big_text);
++    if (w > HT_WIDTH - 80) w = HT_WIDTH - 80;
++    ht_text(f, (HT_WIDTH - w) / 2, 194, w, digits, color(PB_INK_BUSY), BG, big_text);
 +    enum { X = 143, Y = 318, W = 180, H = 56 };
 +    const ht_font_t *pf = &ht_lv_inter_28.base;
 +    int sw = ht_measure(pf, "Stop");
 +    ht_box(f, X, Y, W, H, H / 2, color(0x171718), color(0x3a3f4b));
 +    ht_text(f, (HT_WIDTH - sw) / 2, Y + (H - pf->height) / 2, sw, pf, color(PB_INK_BUSY), color(0x171718), "Stop");
++}
++/*
++ * THE TIMER DIAL (pb 6): hours, minutes and seconds in three columns, each a "+" over its value over its unit over a
++ * "-"; a drag up or down a column turns it too (a step every PB_DIAL_STEP px). Start sets the timer and goes to the
++ * clock; with a timer running, its time left heads the page and Stop cancels it. A swipe right (or the small button)
++ * goes back to the clock. Opened by a tap on the clock's timer line, a long press nowhere: it is a page, not a mode.
++ */
++enum { PB_DIAL_STEP = 22, PB_DIAL_PLUS_Y = 122, PB_DIAL_VALUE_Y = 184, PB_DIAL_UNIT_Y = 240, PB_DIAL_MINUS_Y = 270,
++       PB_DIAL_BOX = 52, PB_DIAL_PILL_Y = 344 };
++static const int pb_dial_x[3] = {128, 233, 338};
++static int pb_dial_column(int x) { return x < 180 ? 0 : x < 286 ? 1 : 2; }
++static void pb_dial_turn(int column, int by)
++{
++    int *v = column == 0 ? &pb.set_h : column == 1 ? &pb.set_m : &pb.set_s;
++    int top = column == 0 ? 24 : 60;
++    *v = ((*v + by) % top + top) % top;
++}
++static void render_timerset(ht_scene_t *f)
++{
++    focus_header(f, "TIMER");
++    const ht_font_t *big = &ht_lv_inter_44.base, *mid = &ht_lv_inter_25.base, *small = &ht_lv_inter_20.base;
++    if (pbt.running) {
++        char left[16], line[40];
++        pb_timer_text(left, sizeof left, pb_timer_left());
++        snprintf(line, sizeof line, "%s left", left);
++        focus_put(f, 40, 92, HT_WIDTH - 80, small, color(PB_INK_BUSY), BG, line, true);
++    }
++    const int value[3] = {pb.set_h, pb.set_m, pb.set_s};
++    static const char *const unit[3] = {"hours", "min", "sec"};
++    uint16_t box = color(0x171718), edge = color(0x3a3f4b), ink = FG;
++    for (int c = 0; c < 3; c++) {
++        int cx = pb_dial_x[c];
++        for (int up = 1; up >= 0; up--) {
++            int y = up ? PB_DIAL_PLUS_Y : PB_DIAL_MINUS_Y, hit = s.hit_count;
++            if (hit < 24) s.hits[s.hit_count++] = (hit_t){{cx - 48, y - 8, 96, PB_DIAL_BOX + 16}, A_PB_SET_ADJ,
++                                                           c * 2 + up, true};
++            uint16_t fill = hit == s.pressed ? color(0x30333f) : box;
++            ht_box(f, cx - 36, y, 72, PB_DIAL_BOX, 14, fill, edge);
++            // "+" and "-" drawn, not set: Inter's minus sits low and its plus is thin at this size
++            ht_box(f, cx - 12, y + PB_DIAL_BOX / 2 - 2, 24, 4, 2, ink, ink);
++            if (up) ht_box(f, cx - 2, y + PB_DIAL_BOX / 2 - 12, 4, 24, 2, ink, ink);
++        }
++        char text[4];
++        snprintf(text, sizeof text, "%02d", value[c] < 0 ? 0 : value[c] > 99 ? 99 : value[c]);
++        int w = ht_measure(big, text);
++        ht_text(f, cx - w / 2, PB_DIAL_VALUE_Y, w, big, FG, BG, text);
++        w = ht_measure(small, unit[c]);
++        ht_text(f, cx - w / 2, PB_DIAL_UNIT_Y, w, small, DIM, BG, unit[c]);
++        if (c < 2) {
++            int cw = ht_measure(big, ":");
++            ht_text(f, (cx + pb_dial_x[c + 1]) / 2 - cw / 2, PB_DIAL_VALUE_Y - 2, cw, big, DIM, BG, ":");
++        }
++    }
++    bool any = pb.set_h || pb.set_m || pb.set_s;
++    if (pbt.running) {
++        pb_pill(f, 73, PB_DIAL_PILL_Y, 150, "Stop", color(PB_INK_BUSY), A_PB_SET_STOP, true);
++        pb_pill(f, 243, PB_DIAL_PILL_Y, 150, "Start", color(HT_THEME_VOICE), A_PB_SET_GO, any);
++    } else pb_pill(f, 143, PB_DIAL_PILL_Y, 180, "Start", color(HT_THEME_VOICE), A_PB_SET_GO, any);
++    (void)mid;
 +}
 +/*
 + * THE PICKER (owner's design C4, the pages): one row's choices paged sideways — its label as the header, the choice
@@ -3490,7 +3680,7 @@ index f3c3fa2..55e27c0 100644
  static void render_settings(ht_scene_t *f)
  {
      heading(f, "controls");
-@@ -2160,6 +3044,7 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2160,6 +3164,7 @@ bool habitat_scene_take(ht_scene_t *f)
          break;
      }
      case STOP:
@@ -3498,7 +3688,7 @@ index f3c3fa2..55e27c0 100644
          heading(f, "stop this turn?");
          center(f, 185, "Your work stays.", FG);
          center(f, 227, "This turn stops.", DIM);
-@@ -2183,7 +3068,23 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2183,7 +3188,26 @@ bool habitat_scene_take(ht_scene_t *f)
      case OTA:
          render_brand(f);
          break;
@@ -3517,12 +3707,15 @@ index f3c3fa2..55e27c0 100644
 +    case TIMER:
 +        render_timer(f);
 +        break;
++    case TIMERSET:
++        render_timerset(f);
++        break;
      case MESSAGE:
 +        if (pb.host && character.id == HT_CHARACTER_FOCUS) { render_pb_message(f); break; }
          heading(f, s.title);
          ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
          break;
-@@ -2290,7 +3191,7 @@ static action_t make_action(hit_t h)
+@@ -2290,7 +3314,7 @@ static action_t make_action(hit_t h)
          COPY(a.id, s.agents[h.value].id);
      else if (h.action == A_NOTICE && h.value < s.notice_count)
          COPY(a.id, s.notice[h.value].agent_id);
@@ -3531,7 +3724,7 @@ index f3c3fa2..55e27c0 100644
          COPY(a.id, s.tabs[h.value].id);
      else if (h.action == A_MACHINE && h.value < s.machine_count)
          COPY(a.id, s.machines[h.value].id);
-@@ -2415,6 +3316,10 @@ static void dispatch(action_t a)
+@@ -2415,6 +3439,10 @@ static void dispatch(action_t a)
          }
          break;
      case A_HOME:
@@ -3542,7 +3735,7 @@ index f3c3fa2..55e27c0 100644
          if (workspace.phase!=HT_WORKSPACE_IDLE) {
              ht_workspace_cancel_request(&workspace); s.loading=false; s.active=-1;
          }
-@@ -2537,6 +3442,10 @@ static void dispatch(action_t a)
+@@ -2537,6 +3565,10 @@ static void dispatch(action_t a)
          view(MACHINES);
          break;
      case A_TAB:
@@ -3553,7 +3746,7 @@ index f3c3fa2..55e27c0 100644
          if (s.view==TABS && workspace_index(a.id)>=0)
              ht_tab_carousel_reset(&tab_carousel,s.tab_count,workspace_index(a.id));
          tab_request(a.id,s.view==TABS);
-@@ -2738,7 +3647,7 @@ static void dispatch(action_t a)
+@@ -2738,7 +3770,7 @@ static void dispatch(action_t a)
          if (s.connected && find(s.stop_agent) >= 0 && s.agents[find(s.stop_agent)].busy) {
              COPY(a.id, s.stop_agent);
              queue(a);
@@ -3562,7 +3755,7 @@ index f3c3fa2..55e27c0 100644
          }
          break;
      case A_MODELS:
-@@ -2779,6 +3688,83 @@ static void dispatch(action_t a)
+@@ -2779,6 +3811,107 @@ static void dispatch(action_t a)
          break;
      case A_SETTINGS_SAVE:
          break;   // the worker's alone: it is queued, never dispatched from a hit rect
@@ -3627,7 +3820,31 @@ index f3c3fa2..55e27c0 100644
 +        break;
 +    case A_PB_TIMER_STATE:
 +    case A_PB_TIMER_DONE:
++    case A_PB_ALARM_STATE:
 +        break;   // the worker's alone
++    case A_PB_SET_OPEN:
++        // The dial opens on what it was last set to (or the Mac's Custom… value), 5 min the first time.
++        if (!pb.set_h && !pb.set_m && !pb.set_s) pb.set_m = 5;
++        view(TIMERSET);
++        break;
++    case A_PB_SET_ADJ:
++        if (s.view == TIMERSET && a.value >= 0 && a.value < 6) {
++            pb_dial_turn(a.value / 2, a.value % 2 ? 1 : -1);
++            change();
++        }
++        break;
++    case A_PB_SET_GO: {
++        int seconds = pb.set_h * 3600 + pb.set_m * 60 + pb.set_s;
++        if (s.view != TIMERSET || seconds <= 0) break;
++        pb_timer_set(seconds, "Timer");   // the clock's line shows the time left beside it
++        view(CLOCK);
++        break;
++    }
++    case A_PB_SET_STOP:
++        if (s.view != TIMERSET) break;
++        pb_timer_set(0, NULL);
++        view(CLOCK);
++        break;
 +    case A_PB_CHOOSE:
 +    case A_PB_BACK: {
 +        // Back to the list, on the page that holds the row; Choose sends the choice (pb.menu.set) on the way.
@@ -3646,7 +3863,7 @@ index f3c3fa2..55e27c0 100644
      case A_QUESTION_READ:
      case A_NOTICE_READ:
      case A_TAB_REFRESH:
-@@ -2890,6 +3876,21 @@ static void worker(void *unused)
+@@ -2890,6 +4023,24 @@ static void worker(void *unused)
          case A_STOP_YES:
              cable_client_stop_turn(a.id);
              break;
@@ -3662,13 +3879,16 @@ index f3c3fa2..55e27c0 100644
 +        case A_PB_TIMER_STATE:
 +            cable_client_pb_timer_state(a.value);
 +            break;
++        case A_PB_ALARM_STATE:
++            cable_client_pb_alarm_state(a.id, a.value, a.text);
++            break;
 +        case A_PB_TIMER_DONE:
 +            cable_client_pb_timer_done(a.text);
 +            break;
          case A_MODEL: {
              const char *p = strrchr(a.text, ':');
              char model[128];
-@@ -2958,6 +3959,29 @@ static void worker(void *unused)
+@@ -2958,6 +4109,29 @@ static void worker(void *unused)
          }
      }
  }
@@ -3681,12 +3901,12 @@ index f3c3fa2..55e27c0 100644
 +static bool pb_pressable(action_kind_t kind)
 +{
 +    return kind == A_PBMENU_TAP || kind == A_PB_PICK || kind == A_PB_CHOOSE || kind == A_PB_BACK || kind == A_TAB ||
-+           kind == A_HOME || kind == A_STOP_YES;
++           kind == A_HOME || kind == A_STOP_YES || kind == A_PB_SET_ADJ || kind == A_PB_SET_GO || kind == A_PB_SET_STOP;
 +}
 +// The screens whose controls answer the release rule: Puck Bridge's own, and (pb 4) its message and stop screens.
 +static bool pb_release_view(void)
 +{
-+    return s.view == PBMENU || s.view == PICKER || (s.view == TABS && pb_tabs()) ||
++    return s.view == PBMENU || s.view == PICKER || s.view == TIMERSET || (s.view == TABS && pb_tabs()) ||
 +           (pb.host && character.id == HT_CHARACTER_FOCUS && (s.view == MESSAGE || s.view == STOP));
 +}
 +static bool pb_released(int x, int y, uint32_t now)
@@ -3698,10 +3918,31 @@ index f3c3fa2..55e27c0 100644
  void habitat_touch(bool down, int x, int y, uint32_t now)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -2969,6 +3993,69 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2969,6 +4143,104 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
  #endif
      if (!s.ready)
          return;
++    if (pb.ptt && !down && s.touch_down) {
++        // pb 6: hold to talk, released. Long enough: send (now, or once the microphone is recording); a short one was
++        // a slow tap, and the microphone stays open for a tap to send.
++        ht_gesture_end(&gesture, x, y, now);
++        pb.ptt = false;
++        bool held = now - s.touch_started >= PB_PTT_TAP_MS;
++        ESP_LOGI("habitat", "hold to talk released after %u ms: %s", (unsigned)(now - s.touch_started),
++                 !held ? "keep listening" : s.view != VOICE ? "voice closed" : "send");
++        if (held && s.view == VOICE) {
++            if (!s.voice_start_pending && !s.voice_waiting && audio_client_recording())
++                dispatch((action_t){.kind = A_VOICE_STOP});
++            else if (!s.voice_waiting) pb.ptt_stop = true;
++        }
++        s.touch_down = false;
++        s.pressed = -1;
++        s.last_x = x;
++        s.last_y = y;
++        change();
++        return;
++    }
++    if (pb.ptt && (s.view != VOICE || !s.voice_open)) pb.ptt = false;
 +    if (s.view == TIMER) {
 +        // THE ALARM STOPS AT A TOUCH, anywhere, on the touch's first sample; the rest of that contact is spent.
 +        if (down && !s.touch_down) {
@@ -3750,6 +3991,20 @@ index f3c3fa2..55e27c0 100644
 +                s.touch_down = down; s.last_x = x; s.last_y = y;
 +                return;
 +            }
++            if (pb_nav()) {
++                // pb 6: a tap on the timer's line opens the dial; a tap anywhere else goes to the face of the chat on
++                // it (else the first), or, with nothing on this tab, to the chats.
++                bool timer_line = abs(dx) < 48 && abs(dy) < 40 && s.start_y >= CLOCK_WEATHER_Y - 8 &&
++                                  s.start_y < CLOCK_WEATHER_Y + 34;
++                if (timer_line && (pbt.running || pb.host)) a.kind = A_PB_SET_OPEN;
++                else if (!s.count) a.kind = A_PB_CHATS;
++                else if (s.active < 0 || s.active >= s.count) { a.kind = A_AGENT; COPY(a.id, s.agents[0].id); }
++                ESP_LOGI("habitat", "clock tap %d,%d: %s", s.start_x, s.start_y, a.kind == A_PB_SET_OPEN ? "timer" :
++                         a.kind == A_PB_CHATS ? "chats" : "face");
++                dispatch(a);
++                s.touch_down = down; s.last_x = x; s.last_y = y;
++                return;
++            }
 +            if (sideways && dx > 0) a.kind = A_PBMENU_OPEN;
 +            else if (sideways && (s.active < 0 || s.active >= s.count) && s.count) {
 +                a.kind = A_AGENT;
@@ -3768,15 +4023,18 @@ index f3c3fa2..55e27c0 100644
      bool surface = s.view == HOME || s.view == AGENT;
      if (s.touch_down && !s.touch_cancelled) {
          // Classify this sample before the hold deadline. A delayed MOVE/UP
-@@ -2990,6 +4077,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2989,7 +4261,10 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+         if (question_view(s.view)) s.q.drag=0;
          s.draft_drag = 0;
          s.tab_drag = 0;
++        pb.dial_drag = 0;
++        pb.dial_dragged = false;
          s.pressed = -1;
 +        pb.press_offset = s.offset;
          pressed_action = make_action((hit_t){.action = A_NONE});
          for (int i = 0; i < s.hit_count; i++) {
              hit_t h = s.hits[i];
-@@ -3002,9 +4090,12 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3002,9 +4277,12 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          }
          if (surface && pressed_action.kind==A_TABS && !s.touch_brake)
              ht_workspace_touch(&workspace,workspace_index(s.selected_tab),s.tab_count,x,y,now);
@@ -3791,7 +4049,7 @@ index f3c3fa2..55e27c0 100644
          if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_NOTICE)
              ht_tab_carousel_begin(&inbox_carousel, x, now);
          ht_gesture_begin(&gesture, x, y, now, ((uint32_t)s.view << 8) | pressed_action.kind);
-@@ -3026,15 +4117,19 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3026,16 +4304,30 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          ht_gesture_move(&gesture, x, y);
          if (surface && home_footer(pressed_action.kind)) {
              if (pressed_action.kind==A_TABS && ht_workspace_move(&workspace,x,y,gesture.axis,now)) change();
@@ -3813,9 +4071,20 @@ index f3c3fa2..55e27c0 100644
 -        } else if ((s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1) {
 +        } else if ((s.view == AGENTS || s.view == SETTINGS || s.view == PBMENU) && gesture.axis == 1) {
              tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
++        } else if (s.view == TIMERSET && gesture.axis == 1) {
++            // pb 6: a drag up a dial column counts it up, down counts it down, a step every PB_DIAL_STEP px.
++            pb.dial_drag += s.last_y - y;
++            while (abs(pb.dial_drag) >= PB_DIAL_STEP) {
++                int step = pb.dial_drag > 0 ? 1 : -1;
++                pb_dial_turn(pb_dial_column(s.start_x), step);
++                pb.dial_drag -= step * PB_DIAL_STEP;
++                pb.dial_dragged = true;
++                change();
++            }
          } else if (s.view == DRAFT && gesture.axis == 1) {
              draft_move((s.last_y - y) * (scroll_reversed ? -1 : 1), now);
-@@ -3055,15 +4150,21 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+         } else if (s.view == FORM && gesture.axis == 1) {
+@@ -3055,15 +4347,21 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
      if (!down && s.touch_down) {
          ht_touch_result_t result = ht_gesture_end(&gesture, x, y, now);
          bool pane_contact = s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && pane_carousel.touching;
@@ -3840,7 +4109,7 @@ index f3c3fa2..55e27c0 100644
          bool scrolled = ht_scroll_end(&scroll, x, y, now);
          if (scrolled) {
              uint32_t coast = ht_scroll_coast_ms(scroll.velocity);
-@@ -3072,8 +4173,29 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3072,8 +4370,31 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          }
          int dx = x - s.start_x, dy = y - s.start_y;
          s.pressed = -1;
@@ -3848,6 +4117,8 @@ index f3c3fa2..55e27c0 100644
 +        bool nav_up = pb_nav() && gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx);
          if (scrolled || s.touch_cancelled) {
              // Motion owns this entire contact, even if it returns to its start.
++        } else if (nav_side && s.view == TIMERSET) {
++            if (dx > 0) view(CLOCK);   // pb 6: the dial came from the clock; right goes back
 +        } else if (nav_side && (s.view == GROUPS || s.view == AGENTS || s.view == TABS)) {
 +            // pb 5: right goes back (a list to the groups, the groups to the clock, the tabs to the face); left on the
 +            // groups is the chats.
@@ -3870,7 +4141,7 @@ index f3c3fa2..55e27c0 100644
          } else if (tab_contact) {
              int index = pressed_action.value;
              if (tab_tap && result == HT_TOUCH_TAP && pressed_action.kind == A_TAB && index >= 0 &&
-@@ -3101,6 +4223,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3101,6 +4422,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
              change();
          } else if (result == HT_TOUCH_TAP && s.touch_brake) {
              // DOWN already stopped desktop inertia. This entire tap is only a brake.
@@ -3878,10 +4149,10 @@ index f3c3fa2..55e27c0 100644
 +                   !(gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy))) {
 +            // Puck Bridge's rows and picker controls answer the footer rule (pb_released), never a sideways swipe,
 +            // which pages below.
-+            bool hit = pb_released(x, y, now);
++            bool hit = pb_released(x, y, now) && !pb.dial_dragged;
 +            ESP_LOGI("habitat", "menu touch %d,%d -> %d,%d in %u ms on %s %d: %s", s.start_x, s.start_y, x, y,
 +                     (unsigned)(now - s.touch_started), s.view == PBMENU ? "row" : s.view == TABS ? "tab" :
-+                     s.view == PICKER ? "picker" : s.view == STOP ? "stop" : "message",
++                     s.view == PICKER ? "picker" : s.view == STOP ? "stop" : s.view == TIMERSET ? "dial" : "message",
 +                     pressed_action.value,
 +                     hit ? "pressed" : "not a press");
 +            if (hit) dispatch(pressed_action);
@@ -3889,7 +4160,7 @@ index f3c3fa2..55e27c0 100644
          } else if (surface && pressed_action.kind==A_TABS) {
              bool cancelled=workspace.cancelled || (workspace.touching && now-workspace.began>=5000);
              int chosen=ht_workspace_release(&workspace,x,y,gesture.axis,now);
-@@ -3178,7 +4312,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3178,7 +4511,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  dispatch(pressed_action);
              }
          } else if (gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx)) {
@@ -3898,7 +4169,7 @@ index f3c3fa2..55e27c0 100644
                  // The list consumed the drag already, including its final sample.
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  // Reading a draft never submits or starts recording.
-@@ -3193,6 +4327,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3193,6 +4526,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
                  // is the gesture the rest of the world already means by it.
                  view(INBOX);
@@ -3910,7 +4181,7 @@ index f3c3fa2..55e27c0 100644
              } else if (surface) {
                  // A congested scroll queue cannot turn a scroll into navigation or voice.
              } else if (s.start_y >= 400 && dy < 0)
-@@ -3213,8 +4352,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3213,8 +4551,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (next >= 0 && next < count) s.offset = next;
              }
          } else if (gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy)) {
@@ -3932,7 +4203,7 @@ index f3c3fa2..55e27c0 100644
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  if (dx > 0) {
                      action_t a = make_action((hit_t){.action = s.view == DRAFT ? A_DRAFT_OPTIONS : A_DRAFT_BACK});
-@@ -3226,7 +4377,30 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3226,7 +4576,30 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (dx>0 && !s.q.pending) view(s.view==ANSWER_REVIEW ? CHOICE : s.view==CHOICE ? QUESTION : HOME);
              } else if (s.view == INBOX && s.notice_count)
                  s.offset = (s.offset + (dx < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
@@ -3964,7 +4235,7 @@ index f3c3fa2..55e27c0 100644
                  int i = s.active < 0 ? 0 : (s.active + (dx < 0 ? 1 : s.count - 1)) % s.count;
                  action_t a = {.kind = A_AGENT};
                  COPY(a.id, s.agents[i].id);
-@@ -3265,6 +4439,7 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3265,6 +4638,7 @@ uint32_t habitat_next_wake_ms(void)
          delay = 125;
      if (s.view == TABS && tab_carousel.animating && !display_is_asleep()) delay = 16;
      if (s.view == AGENTS && pane_carousel.animating && !display_is_asleep()) delay = 16;
@@ -3972,7 +4243,7 @@ index f3c3fa2..55e27c0 100644
      if (s.view == INBOX && inbox_carousel.animating && !display_is_asleep()) delay = 16;
      if (selection.pending && delay > 100) delay = 100;
      if (visit.pending && delay > 100) delay = 100;
-@@ -3276,6 +4451,21 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3276,6 +4650,21 @@ uint32_t habitat_next_wake_ms(void)
          uint32_t due = status_wake_ms(now);
          if (due < delay) delay = due;
      }
@@ -3994,7 +4265,7 @@ index f3c3fa2..55e27c0 100644
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
          int32_t left = (int32_t)(s.pet_next_ms - now);
          uint32_t due = left < 1 ? 1 : (uint32_t)left;
-@@ -3300,6 +4490,141 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3300,6 +4689,182 @@ uint32_t habitat_next_wake_ms(void)
          }
      return delay;
  }
@@ -4017,6 +4288,34 @@ index f3c3fa2..55e27c0 100644
 +{
 +    if (pb_queue_quiet((action_t){.kind = A_PB_TIMER_STATE, .value = seconds})) pbt.reported = ms();
 +}
++// pb 6: one alarm told to the Mac — its seconds to go, 0 once it rang or was cleared.
++static int pb_alarm_left(int k)
++{
++    if (!pba[k].on) return 0;
++    int64_t left = pba[k].at_us - esp_timer_get_time();
++    return left <= 0 ? 0 : (int)((left + 999999) / 1000000);
++}
++static void pb_alarm_report(int k)
++{
++    action_t a = {.kind = A_PB_ALARM_STATE, .value = pb_alarm_left(k)};
++    COPY(a.id, pba[k].id);
++    COPY(a.text, pba[k].label);
++    pb_queue_quiet(a);
++}
++// The timer set (seconds > 0) or cancelled (0), from the Mac or the dial; either silences an alarm without a report.
++static void pb_timer_set(int seconds, const char *label)
++{
++    pb_timer_silence("replaced", false);
++    pbt.running = seconds > 0;
++    if (pbt.running) {
++        pbt.end_us = esp_timer_get_time() + (int64_t)seconds * 1000000;
++        PB_COPY(pbt.label, label ? label : "");
++    }
++    pbt.shown = -1;
++    ESP_LOGI("habitat", "timer %s %d s", pbt.running ? "set" : "cancelled", seconds);
++    pb_timer_report(pbt.running ? seconds : 0);
++    change();
++}
 +// "4:59", "1:04:59"
 +static void pb_timer_text(char *dst, size_t cap, int seconds)
 +{
@@ -4029,7 +4328,7 @@ index f3c3fa2..55e27c0 100644
 +    if (!pbt.ringing) return;
 +    pbt.ringing = false;
 +    ESP_LOGI("habitat", "timer alarm %s", reason);
-+    if (report) {
++    if (report && !pbt.alarm) {   // an alarm's end is its pb.alarm.state 0, sent when it rang
 +        action_t a = {.kind = A_PB_TIMER_DONE};
 +        COPY(a.text, reason);
 +        pb_queue_quiet(a);
@@ -4038,7 +4337,19 @@ index f3c3fa2..55e27c0 100644
 +}
 +static void pb_timer_tick(uint32_t now)
 +{
-+    if (pbt.running) {
++    // pb 6: an alarm that came due rings the same screen, unless something rings already (it waits its turn).
++    for (int i = 0; i < PB_ALARMS && !pbt.ringing; i++)
++        if (pba[i].on && esp_timer_get_time() >= pba[i].at_us) {
++            ESP_LOGI("habitat", "alarm %s: time's up", pba[i].id);
++            pba[i].on = false;
++            pbt.ringing = pbt.alarm = true;
++            PB_COPY(pbt.ring_label, pba[i].label);
++            pbt.ring_started = pbt.next_ring = now;
++            pbt.back = s.view;
++            pb_alarm_report(i);
++            if (display_is_asleep()) display_wake();
++        }
++    if (pbt.running && !pbt.ringing) {
 +        int left = pb_timer_left();
 +        if (left != pbt.shown) {
 +            pbt.shown = left;
@@ -4047,8 +4358,9 @@ index f3c3fa2..55e27c0 100644
 +        if (left && now - pbt.reported >= PB_REPORT_MS) pb_timer_report(left);
 +        if (!left) {
 +            ESP_LOGI("habitat", "timer: time's up");
-+            pbt.running = false;
++            pbt.running = pbt.alarm = false;
 +            pbt.ringing = true;
++            PB_COPY(pbt.ring_label, pbt.label);
 +            pbt.ring_started = pbt.next_ring = now;
 +            pbt.back = s.view;
 +            pb_timer_report(0);
@@ -4136,17 +4448,18 @@ index f3c3fa2..55e27c0 100644
  void habitat_tick(void)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -3314,6 +4639,9 @@ void habitat_tick(void)
+@@ -3314,6 +4879,10 @@ void habitat_tick(void)
          change();
      }
      surface_tick(now);
 +    pb_tick(now);
 +    pb_timer_tick(now);
++    pb_ptt_tick();
 +    pb_preview_tick(now);
      if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");
      if ((s.q.loading || (s.q.pending && !s.q.uncertain)) && (int32_t)(now-s.q.deadline)>=0) {
          if (s.q.loading) { s.q.loading=false; COPY(s.q.error,"Question did not arrive. Open the alert again."); }
-@@ -3375,7 +4703,10 @@ void habitat_tick(void)
+@@ -3375,7 +4944,10 @@ void habitat_tick(void)
              } else if (s.view == DRAFT) {
                  COPY(draft.page.error, "No voice reply. Checking your draft."); change();
              } else {
@@ -4158,7 +4471,7 @@ index f3c3fa2..55e27c0 100644
              }
          }
      }
-@@ -3601,6 +4932,7 @@ void ui_set_connected(bool value)
+@@ -3601,6 +5173,7 @@ void ui_set_connected(bool value)
          if (question_view(s.view)) view(HOME);
          ht_visit_close(&visit);
          ht_carry_close(&carry);
@@ -4166,7 +4479,7 @@ index f3c3fa2..55e27c0 100644
      }
      s.connected = value;
      if (!value && form.id[0]) { ht_form_reset(&form); view(HOME); }
-@@ -3644,6 +4976,27 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
+@@ -3644,6 +5217,27 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
      }
      display_unlock();
  }
@@ -4194,7 +4507,32 @@ index f3c3fa2..55e27c0 100644
  void ui_project_fill_missing_engine(const char *engine)
  {
      display_lock();
-@@ -4007,8 +5360,16 @@ void ui_land_after_reload(void)
+@@ -3841,6 +5435,24 @@ void ui_project_emit(const char *id, const char *session, const char *kind, cons
+ {
+     event(id, session, kind, text_, recap, false);
+ }
++// pb 6: the host's word on how long a working turn has run (turn.started elapsed), so "Working" counts from when the
++// turn began, not from when this puck heard of it. Only a busy pane, and only a difference worth a redraw.
++void ui_project_busy_since(const char *id, int elapsed)
++{
++    display_lock();
++    pane_memory_t *m = pane_memory(id, false);
++    if (m && m->busy && elapsed > 0) {
++        uint32_t since = ms() - (uint32_t)elapsed * 1000u;
++        if (!since) since = 1;
++        int drift = (int)((ms() - m->busy_ms) / 1000) - elapsed;
++        if (drift > 2 || drift < -2) {
++            m->busy_ms = since;
++            int i = find(id);
++            if (i >= 0) { s.agents[i].busy_ms = since; change(); }
++        }
++    }
++    display_unlock();
++}
+ void ui_project_restore_event(const char *id, const char *kind, const char *text_,
+                               const char *recap)
+ {
+@@ -4007,8 +5619,16 @@ void ui_land_after_reload(void)
      if (s.loading && (workspace.phase==HT_WORKSPACE_IDLE || workspace.phase==HT_WORKSPACE_READY)) {
          ht_workspace_cancel_request(&workspace);
          s.loading = false;
@@ -4213,7 +4551,7 @@ index f3c3fa2..55e27c0 100644
      change();
      display_unlock();
  }
-@@ -4046,7 +5407,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
+@@ -4046,7 +5666,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
  bool ui_switch_is_open(void) { return s.view == TABS; }
  bool ui_scroll_reportable(void)
  {
@@ -4223,7 +4561,7 @@ index f3c3fa2..55e27c0 100644
             !display_is_asleep() && !s.voice_open && !audio_client_active();
  }
  int ui_notif_pull_zone_px(void) { return 0; }
-@@ -4864,7 +6226,7 @@ void ui_cable_toast(const char *message)
+@@ -4864,7 +6485,7 @@ void ui_cable_toast(const char *message)
          return;
      }
      display_unlock();
@@ -4232,7 +4570,7 @@ index f3c3fa2..55e27c0 100644
  }
  void ui_voice_error(const char *message)
  {
-@@ -5016,16 +6378,197 @@ void ui_stop_active_turn(void)
+@@ -5016,16 +6637,223 @@ void ui_stop_active_turn(void)
      }
      display_unlock();
  }
@@ -4287,18 +4625,6 @@ index f3c3fa2..55e27c0 100644
 +    return stop;
 +}
 +// Copy a host string whole-letter: a UTF-8 sequence the bound would cut is dropped, not half sent back.
-+static void pb_copy(char *dst, size_t cap, const char *src)
-+{
-+    copy(dst, cap, src);
-+    size_t n = strlen(dst), k = n;
-+    while (k && ((unsigned char)dst[k - 1] & 0xc0) == 0x80) k--;
-+    if (k && (unsigned char)dst[k - 1] >= 0xc0) {
-+        unsigned char lead = (unsigned char)dst[k - 1];
-+        size_t need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : 2;
-+        if (n - (k - 1) < need) dst[k - 1] = 0;
-+    }
-+}
-+#define PB_COPY(dst, src) pb_copy(dst, sizeof(dst), src)
 +void ui_ambient(const char *time, const char *ampm, const char *date, const char *temp, const char *cond,
 +                const char *hilo, int idle_min)
 +{
@@ -4413,16 +4739,54 @@ index f3c3fa2..55e27c0 100644
 +void ui_pb_timer(int seconds, const char *label)
 +{
 +    display_lock();
-+    pb_timer_silence("replaced", false);   // the Mac's own new timer (or cancel) silences an alarm without a report
-+    pbt.running = seconds > 0;
-+    if (pbt.running) {
-+        pbt.end_us = esp_timer_get_time() + (int64_t)seconds * 1000000;
-+        PB_COPY(pbt.label, label);
++    pb_timer_set(seconds, label);
++    display_unlock();
++}
++// pb 6: the Mac's "Custom…" opens the dial, set to `seconds` (0: as it was left).
++void ui_pb_timerset(int seconds)
++{
++    display_lock();
++    if (seconds > 0) { pb.set_h = seconds / 3600; pb.set_m = seconds / 60 % 60; pb.set_s = seconds % 60; }
++    if (!pbt.ringing) {
++        if (s.touch_down) input_cancel();
++        dispatch((action_t){.kind = A_PB_SET_OPEN});
 +    }
-+    pbt.shown = -1;
-+    ESP_LOGI("habitat", "timer %s %d s", pbt.running ? "set" : "cancelled", seconds);
-+    pb_timer_report(pbt.running ? seconds : 0);
++    display_unlock();
++}
++// pb 6: an alarm set (in > 0, replacing one with that id) or cleared (in 0); the Mac turned a time into seconds.
++void ui_pb_alarm(const char *id, int in, const char *label)
++{
++    display_lock();
++    int k = -1, free_k = -1;
++    for (int i = 0; i < PB_ALARMS; i++) {
++        if (pba[i].on && id && !strcmp(pba[i].id, id)) k = i;
++        if (!pba[i].on && free_k < 0) free_k = i;
++    }
++    if (in > 0) {
++        if (k < 0) k = free_k;
++        if (k < 0) {   // full: the soonest gives way to the newest, which says more about what the person wants
++            k = 0;
++            for (int i = 1; i < PB_ALARMS; i++) if (pba[i].at_us < pba[k].at_us) k = i;
++        }
++        PB_COPY(pba[k].id, id ? id : "");
++        PB_COPY(pba[k].label, label && label[0] ? label : "Alarm");
++        pba[k].at_us = esp_timer_get_time() + (int64_t)in * 1000000;
++        pba[k].on = true;
++        ESP_LOGI("habitat", "alarm %s in %d s", pba[k].id, in);
++        pb_alarm_report(k);
++    } else if (k >= 0) {
++        pba[k].on = false;
++        ESP_LOGI("habitat", "alarm %s cleared", pba[k].id);
++        pb_alarm_report(k);
++    }
 +    change();
++    display_unlock();
++}
++// pb 6: every alarm the puck holds, told again (on each welcome, so a Mac that restarted knows them).
++void ui_pb_alarms_resend(void)
++{
++    display_lock();
++    for (int i = 0; i < PB_ALARMS; i++) if (pba[i].on) pb_alarm_report(i);
 +    display_unlock();
 +}
 +void ui_clock_leave(void)
@@ -4436,7 +4800,7 @@ index f3c3fa2..55e27c0 100644
  }
  /*
 diff --git a/devices/harness-device/firmware/main/ui/ui_screens.h b/devices/harness-device/firmware/main/ui/ui_screens.h
-index 0eb5874..6a59436 100644
+index 0eb5874..d0f41e2 100644
 --- a/devices/harness-device/firmware/main/ui/ui_screens.h
 +++ b/devices/harness-device/firmware/main/ui/ui_screens.h
 @@ -88,6 +88,11 @@ void ui_project_set_engine(const char *project_id, const char *engine);
@@ -4451,7 +4815,7 @@ index 0eb5874..6a59436 100644
  
  // Fill only agents whose engine is still unknown (used when machine connected.engine arrives after list).
  void ui_project_fill_missing_engine(const char *engine);
-@@ -463,9 +468,45 @@ void ui_voice_stop(void);
+@@ -463,9 +468,51 @@ void ui_voice_stop(void);
  // call from a non-LVGL task.
  void ui_stop_active_turn(void);
  
@@ -4495,6 +4859,12 @@ index 0eb5874..6a59436 100644
 +void ui_pb_lists(const char *style);
 +// `pb.ui {theme}` (pb 5): the light theme on or off (dark). In RAM; the host repeats it after every welcome.
 +void ui_pb_theme(bool light);
++// pb 6: a busy pane's turn started `elapsed` seconds ago (turn.started.elapsed).
++void ui_project_busy_since(const char *project_id, int elapsed);
++// pb 6: open the timer dial on `seconds`; an alarm `in` seconds from now (0 removes `id`); re-report every alarm.
++void ui_pb_timerset(int seconds);
++void ui_pb_alarm(const char *id, int in, const char *label);
++void ui_pb_alarms_resend(void);
 +// `pb.timer` (pb 3): start (or replace) the puck's countdown of `seconds`, 0 cancels it; `label` may be NULL.
 +void ui_pb_timer(int seconds, const char *label);
  
@@ -4897,9 +5267,9 @@ index 331dda2..cd6a4c0 100644
  harness += function('question_view') + function('copy') + function('input_cancel') + function('view') + function('voice_close') + function('workspace_failed')
  dispatch = source.split('case A_VOICE:\n', 1)[1].split('case A_PET:', 1)[0]
 diff --git a/devices/harness-device/firmware/version.txt b/devices/harness-device/firmware/version.txt
-index 0222dbe..7166b84 100644
+index 0222dbe..f741f5b 100644
 --- a/devices/harness-device/firmware/version.txt
 +++ b/devices/harness-device/firmware/version.txt
 @@ -1 +1 @@
 -0.0.86
-+0.0.88-pb.6
++0.0.88-pb.7

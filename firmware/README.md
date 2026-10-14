@@ -136,6 +136,26 @@ shows "Timer 4:59" in orange in place of the weather; at zero the TIMER screen (
 ring blinking, a Stop pill) wakes the panel and plays the current sound every 2 s (silent when `muted`, never while
 the microphone is open) for up to 60 s.
 
+From pb 6 (firmware pb.7), host → puck also:
+```
+{"t":"turn.started","agentId":"c1","text":"Working…","elapsed":1080}
+{"t":"pb.timerset","seconds":8100}
+{"t":"pb.alarm","id":"a1","in":3600,"label":"Stand-up"}
+```
+`elapsed` (0–604800 s): how long the turn has already run; the face's "Working" counts from then (ignored within 2 s
+of what the puck shows, so the 10-second re-sends don't make it jump). `pb.timerset` opens the **timer dial** set to
+`seconds` (0: as it was left): three columns (hours, minutes, seconds) with + and − (a drag up or down a column turns
+it too), Start, and with a timer running its time left and Stop. A tap on the clock's weather/timer line opens it too.
+`pb.alarm`: up to four alarms, by `id` (≤ 7 bytes), `in` seconds from now (0 clears it), `label` ≤ 23 bytes. A fifth
+replaces the soonest. Held in RAM (an unplug clears them). One that comes due rings the TIMER screen with "ALARM",
+"Alarm", its label and the time (`ambient`'s `time`); a touch or the small button stops it. Puck → host:
+`{"t":"pb.alarm.state","id":"a1","in":S,"label":"…"}` when one is set, cleared (0), rings (0), and for every alarm
+held after each `pb.sound` (so after every welcome). An alarm's end sends no `pb.timer.done`.
+
+With a nav list style (cards, dial, compact) a still finger on the face for 450 ms starts voice and its release sends
+(**hold to talk**); a release within 900 ms of the touch leaves the microphone open for a tap to send. A tap on the
+clock opens the face of the current chat, or the chats list when the tab is empty.
+
 From pb 4 (firmware pb.5), host → puck also:
 ```
 {"t":"pb.ui","lists":"cards"}

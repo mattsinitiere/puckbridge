@@ -1,0 +1,30 @@
+# Puck Bridge firmware pb.7: turn.started's `elapsed` (seconds the turn has already run) sets the face's Working time,
+# so a chat that has worked 18 minutes reads 18:00, not 0:00, on a puck that just heard of it (owner 2026-10-14).
+# A clock tap with nothing on the tab goes to the chats list, not an empty face.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+time +300
+tap 233 200 100
+time +200
+expect view HOME
+in {"t":"turn.started","agentId":"c1","text":"Working…","elapsed":1080}
+time +1200
+shot out/renders/elapsed_face.png
+echo --- the re-sent turn.started (every 10 s) moves nothing unless it drifts
+in {"t":"turn.started","agentId":"c1","text":"Working…","elapsed":1081}
+time +200
+echo --- an empty tab: a tap on the clock goes to the chats
+in {"t":"swarms","selected":"code-b2","items":[{"id":"chats","name":"Chats","agents":5,"panes":5,"working":1},{"id":"code-b2","name":"openharness","agents":0,"panes":0,"working":0}],"tiles":[]}
+in {"t":"agents.begin"}
+in {"t":"agents.end","total":0,"tab":"code-b2"}
+boot tap
+time +300
+expect view CLOCK
+mark
+tap 233 200 100
+time +200
+expect out {"t":"swarm.select","swarmId":"chats"}

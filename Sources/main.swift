@@ -62,6 +62,12 @@ enum Pref {
     static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
     /// The last timer length started on the puck, in minutes.
     static var timerLast: Int { get { d.object(forKey: "timerLast") as? Int ?? 5 } set { d.set(newValue, forKey: "timerLast") } }
+    /// The last custom timer (seconds): the puck's dial opens on it from Settings → Timer → Custom… (firmware pb.7).
+    static var timerCustom: Int { get { d.object(forKey: "timerCustom") as? Int ?? 300 } set { d.set(newValue, forKey: "timerCustom") } }
+    /// "Timer 10 minutes", "alarm 7:30", "stop the timer" said to the puck set its timer and alarms instead of going to Claude.
+    static var voiceCommands: Bool { get { bool("voiceCommands", true) } set { d.set(newValue, forKey: "voiceCommands") } }
+    /// List the sessions of folded Claude Code projects from Claude Code's own files (~/.claude/projects).
+    static var codeFiles: Bool { get { bool("codeFiles", true) } set { d.set(newValue, forKey: "codeFiles") } }
     /// Keep the character library in iCloud Drive too, so every Mac signed in to it has the same characters.
     static var syncCharacters: Bool { get { bool("syncCharacters", true) } set { d.set(newValue, forKey: "syncCharacters") } }
 }
@@ -463,6 +469,184 @@ final class Claude {
 }
 
 // ============================================================================================
+// MARK: Claude Code's session files (the sessions of folded projects)
+// ============================================================================================
+/// A Claude Code session read from its transcript, ~/.claude/projects/<its folder, "/" and "." as "-">/<id>.jsonl.
+/// Claude's sidebar shows a folded project's name but none of its sessions; these files list them without unfolding
+/// anything. Local sessions only: a Cloud session has no file here. The title is Claude Desktop's own when its data
+/// names the session (`desktopTitles`), else the transcript's summary line, else its first prompt, so it can differ
+/// from the sidebar's. Unverified on the owner's Mac (Oct 2026): the log says what was found and matched.
+struct CodeFileSession {
+    let id: String          // the transcript's session id (its file name)
+    let project: String     // the sidebar project it belongs to
+    let title: String
+    let modified: Date
+    let lastPrompt: Date?   // the last thing the person asked: when the running turn began
+    let working: Bool
+}
+
+final class CodeFiles {
+    let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    private struct Parsed { let mtime: Date; let size: Int; let cwd: String; let summary: String; let firstPrompt: String
+                            let lastPrompt: Date?; let ended: Bool }
+    private var parsed: [String: Parsed] = [:]          // by file path, while its date and size hold
+    private var projectOf: [String: String] = [:]       // cwd → its repository's folder name
+    private var desktopTitles: [String: String] = [:]   // session id → Claude Desktop's title for it
+    private var nextDesktopScan = Date.distantPast
+    private var lastLog = ""
+
+    static func slug(_ s: String) -> String { String(s.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }) }
+
+    /// The newest sessions (16 a project at most) of these projects, newest first.
+    func scan(projects: [String], now: Date = Date()) -> [CodeFileSession] {
+        let fm = FileManager.default
+        guard !projects.isEmpty, let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        let slugs = projects.map(CodeFiles.slug)
+        var out: [CodeFileSession] = []
+        for dir in dirs {
+            // The folder is named after the session's cwd: skip those that can't be one of these projects.
+            let name = dir.lastPathComponent.lowercased()
+            guard slugs.contains(where: { name.contains("-" + $0) }) else { continue }
+            let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+            guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys) else { continue }
+            let recent = files.filter { $0.pathExtension == "jsonl" }.compactMap { f -> (URL, Date, Int)? in
+                guard let v = try? f.resourceValues(forKeys: Set(keys)), let m = v.contentModificationDate else { return nil }
+                return (f, m, v.fileSize ?? 0)
+            }.sorted { $0.1 > $1.1 }.prefix(24)
+            for (f, mtime, size) in recent {
+                guard let p = parse(f, mtime: mtime, size: size), !p.cwd.isEmpty else { continue }
+                let repo = projectName(cwd: p.cwd)
+                guard let project = projects.first(where: { $0.caseInsensitiveCompare(repo) == .orderedSame }) else { continue }
+                let id = f.deletingPathExtension().lastPathComponent
+                let title = desktopTitles[id] ?? (p.summary.isEmpty ? p.firstPrompt : p.summary)
+                guard !title.isEmpty else { continue }
+                // Working: written to in the last 45 s, and the last word isn't a finished reply.
+                out.append(CodeFileSession(id: id, project: project, title: title, modified: mtime, lastPrompt: p.lastPrompt,
+                                           working: now.timeIntervalSince(mtime) < 45 && !p.ended))
+            }
+        }
+        out.sort { $0.modified > $1.modified }
+        var count: [String: Int] = [:]
+        out = out.filter { count[$0.project, default: 0] += 1; return count[$0.project]! <= 16 }
+        if now >= nextDesktopScan && !out.isEmpty {
+            nextDesktopScan = now.addingTimeInterval(60)
+            scanDesktopTitles(ids: Set(out.map { $0.id }))
+        }
+        let log = "\(out.count) sessions in \(Set(out.map { $0.project }).count) projects, "
+            + "\(out.filter { desktopTitles[$0.id] != nil }.count) titled by Claude Desktop"
+        if log != lastLog { lastLog = log; say("Claude Code files: \(log)") }
+        return out
+    }
+
+    /// When the running turn of this session began (its last prompt), if its file can be found: by title, else the
+    /// one session of that project written to in the last minute.
+    func turnStart(project: String, title: String, among sessions: [CodeFileSession], now: Date = Date()) -> Date? {
+        let mine = sessions.filter { $0.project == project }
+        let active = mine.filter { now.timeIntervalSince($0.modified) < 60 }
+        let s = mine.first(where: { $0.title == title }) ?? (active.count == 1 ? active[0] : nil)
+        guard let start = s?.lastPrompt, now.timeIntervalSince(start) < 24 * 3600 else { return nil }
+        return start
+    }
+
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
+    }()
+    private static func date(_ v: Any?) -> Date? {
+        guard let s = v as? String else { return nil }
+        return iso.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+    }
+    /// What the person typed, from a "user" record (not a tool's result, a command or a system note).
+    private static func prompt(_ o: [String: Any]) -> String? {
+        guard o["type"] as? String == "user", o["isMeta"] as? Bool != true, o["isSidechain"] as? Bool != true,
+              let msg = o["message"] as? [String: Any] else { return nil }
+        var text = ""
+        if let c = msg["content"] as? String { text = c }
+        else if let parts = msg["content"] as? [[String: Any]] {
+            if parts.contains(where: { $0["type"] as? String == "tool_result" }) { return nil }
+            text = parts.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: " ")
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty || text.hasPrefix("<") || text.hasPrefix("Caveat:") { return nil }
+        return text
+    }
+
+    /// Its first and last 64 KB: the cwd, summary and first prompt are at the top, the last prompt and reply at the end.
+    private func parse(_ f: URL, mtime: Date, size: Int) -> Parsed? {
+        if let p = parsed[f.path], p.mtime == mtime, p.size == size { return p }
+        guard let h = try? FileHandle(forReadingFrom: f) else { return nil }
+        defer { try? h.close() }
+        let chunk = 64 * 1024
+        let head = (try? h.read(upToCount: chunk)) ?? Data()
+        var tail = Data()
+        if size > chunk {
+            try? h.seek(toOffset: UInt64(max(chunk, size - chunk)))
+            tail = (try? h.readToEnd()) ?? Data()
+        }
+        func records(_ d: Data, dropFirst: Bool) -> [[String: Any]] {
+            var lines = d.split(separator: UInt8(ascii: "\n"))
+            if dropFirst && !lines.isEmpty { lines.removeFirst() }   // starts mid-line
+            return lines.compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
+        }
+        let top = records(head, dropFirst: false), end = tail.isEmpty ? top : records(tail, dropFirst: true)
+        let cwd = top.first(where: { $0["cwd"] is String })?["cwd"] as? String
+            ?? end.last(where: { $0["cwd"] is String })?["cwd"] as? String ?? ""
+        let summary = (top + end).first(where: { $0["type"] as? String == "summary" })?["summary"] as? String ?? ""
+        let first = top.lazy.compactMap(CodeFiles.prompt).first ?? ""
+        let firstLine = first.split(separator: "\n").first.map(String.init) ?? ""
+        let lastPrompt = end.last(where: { CodeFiles.prompt($0) != nil }).flatMap { CodeFiles.date($0["timestamp"]) }
+        // Finished: the last message is Claude's, with no tool call waiting on a result.
+        let last = end.last(where: { ["user", "assistant"].contains($0["type"] as? String ?? "") })
+        let content = (last?["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+        let ended = last?["type"] as? String == "assistant" && !content.contains(where: { $0["type"] as? String == "tool_use" })
+        let p = Parsed(mtime: mtime, size: size, cwd: cwd, summary: String(summary.prefix(80)),
+                       firstPrompt: String(firstLine.prefix(60)), lastPrompt: lastPrompt, ended: ended)
+        parsed[f.path] = p
+        return p
+    }
+
+    /// The folder name of the repository a cwd is in: the nearest parent with a .git, and for a worktree (its .git
+    /// a file naming the main repository's .git/worktrees/…) that main repository.
+    func projectName(cwd: String) -> String {
+        if let p = projectOf[cwd] { return p }
+        let fm = FileManager.default
+        var path = cwd
+        if let r = path.range(of: "/.claude/worktrees/") { path = String(path[..<r.lowerBound]) }
+        var dir = path
+        while dir.count > 1 && !fm.fileExists(atPath: dir + "/.git") { dir = (dir as NSString).deletingLastPathComponent }
+        if dir.count > 1 { path = dir }
+        if let g = try? String(contentsOfFile: path + "/.git", encoding: .utf8), g.hasPrefix("gitdir:"),
+           let r = g.range(of: "/.git/worktrees/") {
+            path = String(g[g.index(g.startIndex, offsetBy: 7)..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        let name = (path as NSString).lastPathComponent
+        projectOf[cwd] = name
+        return name
+    }
+
+    /// Claude Desktop's own titles: a small JSON file in its data folder with a "title" and one of these session ids.
+    /// A guess at where it keeps them (Oct 2026, not verified); finding nothing costs only the transcripts' titles.
+    private func scanDesktopTitles(ids: Set<String>) {
+        let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Claude")
+        guard let e = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.fileSizeKey],
+                                                     options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return }
+        let skip: Set<String> = ["Cache", "Code Cache", "GPUCache", "IndexedDB", "Local Storage", "Session Storage",
+                                 "blob_storage", "Crashpad", "logs", "vm_bundles", "Service Worker", "DawnCache",
+                                 "DawnGraphiteCache", "DawnWebGPUCache", "WebStorage", "Partitions", "Shared Dictionary"]
+        var looked = 0
+        for case let f as URL in e {
+            if skip.contains(f.lastPathComponent) || e.level > 6 { e.skipDescendants(); continue }
+            guard f.pathExtension == "json", let size = try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                  size < 256 * 1024 else { continue }
+            looked += 1
+            if looked > 3000 { break }
+            guard let d = try? Data(contentsOf: f), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  let title = o["title"] as? String, !title.isEmpty else { continue }
+            for case let v as String in o.values where ids.contains(v) { desktopTitles[v] = String(title.prefix(80)) }
+        }
+    }
+}
+
+// ============================================================================================
 // MARK: Voice: on-device speech -> text
 // ============================================================================================
 struct SimpleError: LocalizedError { let errorDescription: String?; init(_ s: String) { errorDescription = s } }
@@ -513,6 +697,163 @@ final class Transcriber {
                 finished = true; done(.failure(e))
             }
         }
+    }
+}
+
+/// "1 h 15 min", "1 min 30 s", "45 s".
+func durationName(_ seconds: Int) -> String {
+    var parts: [String] = []
+    if seconds >= 3600 { parts.append("\(seconds / 3600) h") }
+    if seconds / 60 % 60 > 0 { parts.append("\(seconds / 60 % 60) min") }
+    if seconds % 60 > 0 || parts.isEmpty { parts.append("\(seconds % 60) s") }
+    return parts.joined(separator: " ")
+}
+
+/// Things said to the puck that are for the puck, not Claude (Puck Bridge firmware): "timer 2 hours 15 minutes",
+/// "set a timer for 90 seconds", "stop the timer", "alarm 7:30 am", "wake me up at 6", "alarm in 20 minutes for tea",
+/// "cancel my alarms". Only a whole utterance that is one of these counts, so "write a timer function" still goes to
+/// Claude.
+enum VoiceCommand: Equatable {
+    case timer(Int)
+    case stopTimer
+    case alarm(Date, String)
+    case clearAlarms
+
+    private static let words: [String: Int] = [
+        "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+        "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+        "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+        "sixty": 60, "ninety": 90]
+    private static let unitSeconds: [String: Int] = [
+        "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600, "h": 3600,
+        "minute": 60, "minutes": 60, "min": 60, "mins": 60, "m": 60,
+        "second": 1, "seconds": 1, "sec": 1, "secs": 1, "s": 1]
+
+    /// Lower case, no punctuation, numbers as digits ("twenty five" → "25", "an hour" → "1 hour", "2h" → "2 h").
+    static func tokens(_ text: String) -> [String] {
+        var t = text.lowercased()
+        for (a, b) in [("a.m.", " am "), ("p.m.", " pm "), ("o'clock", " "), ("o’clock", " "), ("-", " ")] {
+            t = t.replacingOccurrences(of: a, with: b)
+        }
+        t = String(t.map { $0.isLetter || $0.isNumber || $0 == ":" ? $0 : " " })
+        t = t.replacingOccurrences(of: #"(\d)([a-z])"#, with: "$1 $2", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"([a-z])(\d)"#, with: "$1 $2", options: .regularExpression)
+        let raw = t.split(separator: " ").map(String.init)
+        var out: [String] = []
+        var i = 0
+        while i < raw.count {
+            let w = raw[i]
+            if let n = words[w] {
+                // "twenty five" → 25
+                if n >= 20 && n % 10 == 0, i + 1 < raw.count, let k = words[raw[i + 1]], k > 0 && k < 10 {
+                    out.append(String(n + k)); i += 2; continue
+                }
+                out.append(String(n)); i += 1; continue
+            }
+            if (w == "a" || w == "an"), i + 1 < raw.count, unitSeconds[raw[i + 1]] != nil { out.append("1"); i += 1; continue }
+            out.append(w); i += 1
+        }
+        return out
+    }
+
+    /// Seconds in "2 hours 15 minutes", "1 and a half hours", "half an hour", "90 seconds", "10" (minutes).
+    static func duration(_ t: [String]) -> Int? {
+        let t = t.filter { !["and", "a", "for", "of"].contains($0) }
+        if t.count == 1, let n = Int(t[0]) { return n > 0 ? n * 60 : nil }
+        var total = 0, i = 0
+        while i < t.count {
+            if t[i] == "half", i + 1 < t.count {
+                var j = i + 1
+                if t[j] == "1" && j + 1 < t.count { j += 1 }
+                guard let u = unitSeconds[t[j]] else { return nil }
+                total += u / 2; i = j + 1; continue
+            }
+            guard let n = Int(t[i]), i + 1 < t.count else { return nil }
+            if t[i + 1] == "half", i + 2 < t.count, let u = unitSeconds[t[i + 2]] {   // "1 and a half hours"
+                total += n * u + u / 2; i += 3; continue
+            }
+            guard let u = unitSeconds[t[i + 1]] else { return nil }
+            total += n * u
+            i += 2
+            if i < t.count && t[i] == "half" && (i + 1 == t.count || Int(t[i + 1]) != nil) { total += u / 2; i += 1 }
+        }
+        return total > 0 ? total : nil
+    }
+
+    static func parse(_ text: String, now: Date = Date()) -> VoiceCommand? {
+        var t = tokens(text)
+        let filler: Set<String> = ["hey", "ok", "okay", "please", "puck", "can", "could", "would", "you", "will"]
+        while let f = t.first, filler.contains(f) { t.removeFirst() }
+        while let l = t.last, ["please", "thanks", "now"].contains(l) { t.removeLast() }
+        guard !t.isEmpty, t.count <= 16 else { return nil }
+        let set = Set(t)
+        let verbs: Set<String> = ["stop", "cancel", "clear", "end", "kill", "turn", "delete", "remove"]
+        // stop the timer / cancel my alarms
+        if !set.isDisjoint(with: verbs) {
+            let rest = set.subtracting(verbs).subtracting(["off", "the", "my", "all", "of"])
+            if rest == ["timer"] || rest == ["timers"] { return .stopTimer }
+            if rest == ["alarm"] || rest == ["alarms"] { return .clearAlarms }
+            return nil
+        }
+        // a timer: every word left is the duration
+        if set.contains("timer") {
+            let lead: Set<String> = ["set", "start", "a", "an", "the", "new", "timer", "for", "me"]
+            var d = t
+            while let f = d.first, lead.contains(f) { d.removeFirst() }
+            if d.last == "timer" { d.removeLast() }
+            guard !d.contains("timer"), let secs = duration(d), secs < 24 * 3600 else { return nil }
+            return .timer(secs)
+        }
+        // an alarm: "alarm 7:30 am", "wake me up at 6", "alarm in 20 minutes", "alarm at noon for lunch"
+        guard set.contains("alarm") || t.first == "wake" else { return nil }
+        let lead: Set<String> = ["set", "create", "make", "add", "an", "a", "the", "new", "alarm", "for", "at", "wake",
+                                 "me", "up", "to", "my"]
+        var i = 0
+        while i < t.count, lead.contains(t[i]) { i += 1 }
+        guard i < t.count else { return nil }
+        let labelWords: Set<String> = ["for", "called", "named", "labeled", "labelled", "to"]
+        func label(from j: Int) -> String? {
+            guard j < t.count else { return "Alarm" }
+            guard labelWords.contains(t[j]), j + 1 < t.count else { return nil }
+            let l = t[(j + 1)...].joined(separator: " ")
+            return l.prefix(1).uppercased() + l.dropFirst()
+        }
+        if t[i] == "in" {
+            var j = i + 1
+            while j < t.count, !labelWords.contains(t[j]) { j += 1 }
+            guard let secs = duration(Array(t[(i + 1)..<j])), secs <= 7 * 86400, let l = label(from: j) else { return nil }
+            return .alarm(now.addingTimeInterval(Double(secs)), l)
+        }
+        var hour = -1, minute = 0
+        if t[i] == "noon" { hour = 12; i += 1 }
+        else if t[i] == "midnight" { hour = 0; i += 1 }
+        else if t[i].contains(":") {
+            let p = t[i].split(separator: ":")
+            guard p.count == 2, let h = Int(p[0]), let m = Int(p[1]) else { return nil }
+            hour = h; minute = m; i += 1
+        } else if let n = Int(t[i]) {
+            if n >= 100 && t[i].count >= 3 { hour = n / 100; minute = n % 100 } else { hour = n }   // "730"
+            i += 1
+            if minute == 0, i < t.count, let m = Int(t[i]), m < 60 { minute = m; i += 1 }      // "7 30"
+        } else { return nil }
+        var half: String?   // "am" / "pm"
+        if i < t.count, t[i] == "am" || t[i] == "pm" { half = t[i]; i += 1 }
+        else if i + 2 < t.count, t[i] == "in", t[i + 1] == "the" {
+            if t[i + 2] == "morning" { half = "am"; i += 3 } else if ["afternoon", "evening"].contains(t[i + 2]) { half = "pm"; i += 3 }
+        } else if i < t.count, t[i] == "tonight" { half = "pm"; i += 1 }
+        guard (0...23).contains(hour), (0...59).contains(minute), let l = label(from: i) else { return nil }
+        if half != nil && (hour < 1 || hour > 12) { return nil }
+        let cal = Calendar.current
+        func next(_ h: Int) -> Date? {
+            guard let d = cal.date(bySettingHour: h, minute: minute, second: 0, of: now) else { return nil }
+            return d > now ? d : cal.date(byAdding: .day, value: 1, to: d)
+        }
+        let candidates: [Int]
+        if let h = half { candidates = [hour % 12 + (h == "pm" ? 12 : 0)] }
+        else if hour >= 1 && hour <= 12 { candidates = [hour % 12, hour % 12 + 12] }   // whichever comes first
+        else { candidates = [hour] }
+        guard let when = candidates.compactMap(next).min() else { return nil }
+        return .alarm(when, l)
     }
 }
 
@@ -1443,7 +1784,11 @@ struct Snapshot {
     var fwNote = ""
     var fwBusy = false
     var timerEnd: Date?
+    var alarms: [PuckAlarm] = []
 }
+
+/// An alarm held by the puck (firmware pb.7): it counts down in the puck's RAM, so unplugging clears it.
+struct PuckAlarm: Identifiable, Equatable { let id: String; let label: String; let at: Date }
 
 /// Settings tiles: the rows of the puck's Settings tab, so settings can be changed on the puck itself.
 /// On the default Focus face a touch starts voice for the tile on screen, so: touch, touch again = next value;
@@ -1503,6 +1848,14 @@ final class Bridge {
     var codeProjects: [String] = UserDefaults.standard.stringArray(forKey: "codeProjects") ?? []
     var pendingUnfold: (project: String, at: Date)?
     var codeStatuses: Set<String> = []   // the Code status words seen so far (logged once each, to learn them)
+    // Folded projects' sessions from Claude Code's files (CodeFiles), by project; and the projects the sidebar showed
+    // sessions for on the last read of the Code view (those are listed from the sidebar).
+    let codeFiles = CodeFiles()
+    var fileSessions: [CodeFileSession] = []
+    var fileRows: [String: [Chat]] = [:]
+    var unfoldedProjects: Set<String> = []
+    var fileBusy: Set<String> = []       // busy because its transcript is being written (watchCodeFiles)
+    var nextCodeFiles = Date.distantPast
     var pendingOpen: (id: String, title: String, at: Date, why: String)?
     var pendingMode: (mode: ClaudeMode, at: Date)?
     var statusBusy: Set<String> = []     // busy because the sidebar status said so (watchCodeStatuses)
@@ -1584,6 +1937,7 @@ final class Bridge {
         s.writing = view.writing
         s.fw = fw; s.hw = hw
         s.timerEnd = timerLeft != nil ? timerEnd : nil
+        s.alarms = alarms.sorted { $0.at < $1.at }
         s.chats = chatRows.map { ChatItem(id: $0.id, title: $0.title) }
         for c in codeRows {
             let p = c.project ?? "Code", item = ChatItem(id: c.id, title: c.title)
@@ -1615,6 +1969,7 @@ final class Bridge {
         if port != nil { say("Puck disconnected (\(why))") }
         port = nil; greeted = false; pushedKey = ""; pushedTabsKey = ""; voice = nil; decoder.reset()
         petXfer = nil; petMapSent = ""; puckSettings = nil; settingsNote = ""
+        alarms = []   // the puck holds them; it reports them again after the next welcome
         if fwXfer != nil { fwXfer = nil; fwNote = "The puck disconnected during the install. It keeps its current firmware; try again." }
         pbFirmware = 0
     }
@@ -1666,7 +2021,7 @@ final class Bridge {
         let settings = Pref.puckTiles && pbFirmware < 1
         if Pref.codeTabs {
             for p in projectOrder.prefix(MAX_TABS - 1 - (settings ? 1 : 0)) {
-                let rows = codeRows.filter { ($0.project ?? "Code") == p }.prefix(MAX_ROWS)
+                let rows = codeRowsFor(p).prefix(MAX_ROWS)
                 out.append(PuckTab(id: Bridge.codeTabId(p), name: p, items: rows.map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
             }
         }
@@ -1712,7 +2067,63 @@ final class Bridge {
     }
 
     /// Every row the puck can show, from both of Claude's modes.
-    var allRows: [Chat] { chatRows + codeRows }
+    var allRows: [Chat] {
+        let known = Set(codeRows.map { $0.id })
+        return chatRows + codeRows + fileRows.values.joined().filter { !known.contains($0.id) }
+    }
+
+    /// A project's sessions: the sidebar's, or for a folded project (no rows on the last read of the Code view) the
+    /// ones in Claude Code's files, keeping the sidebar's id and status where a title matches.
+    func codeRowsFor(_ p: String) -> [Chat] {
+        let side = codeRows.filter { ($0.project ?? "Code") == p }
+        guard Pref.codeFiles, !unfoldedProjects.contains(p), let files = fileRows[p], !files.isEmpty else { return side }
+        let byTitle = Dictionary(side.map { ($0.title, $0) }, uniquingKeysWith: { a, _ in a })
+        return files.map { f in byTitle[f.title] ?? f }
+    }
+
+    /// Every few seconds: the folded projects' sessions from their files, and which of them Claude is working in
+    /// (a folded session shows nothing in the sidebar, so its file is the only sign).
+    func watchCodeFiles(now: Date) {
+        guard now >= nextCodeFiles else { return }
+        nextCodeFiles = now.addingTimeInterval(5)
+        guard Pref.codeFiles, Pref.codeTabs, !codeProjects.isEmpty else {
+            if !fileRows.isEmpty { fileRows = [:]; fileSessions = []; pushChats() }
+            return
+        }
+        fileSessions = codeFiles.scan(projects: codeProjects, now: now)
+        var rows: [String: [Chat]] = [:]
+        for f in fileSessions {
+            let id = codeId(project: f.project, title: f.title)
+            if rows[f.project]?.contains(where: { $0.id == id }) == true { continue }
+            rows[f.project, default: []].append(Chat(id: id, title: f.title, element: nil, project: f.project,
+                                                     status: f.working ? "Working" : ""))
+        }
+        let key = { (r: [String: [Chat]]) -> String in r.keys.sorted().map { k in k + ":" + r[k]!.map { $0.id + $0.status }.joined(separator: ",") }.joined(separator: "|") }
+        let changed = key(rows) != key(fileRows)
+        fileRows = rows
+        // A folded project's session starts working here (an unfolded one is watched on screen); any session marked
+        // busy here stops when its file says so.
+        for f in fileSessions {
+            guard let row = (codeRowsFor(f.project) + codeRows).first(where: { $0.project == f.project && $0.title == f.title })
+            else { continue }
+            if f.working {
+                if busy[row.id] == nil && !unfoldedProjects.contains(f.project) {
+                    busy[row.id] = BusyChat(since: f.lastPrompt ?? now, textsBefore: [], labels: [], prompt: "", awaySince: now)
+                    fileBusy.insert(row.id)
+                    say("A Code session in \(f.project) is working (its file)")
+                    sendTurnStarted(row.id, "Working…")
+                    nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
+                } else if fileBusy.contains(row.id) {
+                    busy[row.id]?.awaySince = now
+                }
+            } else if fileBusy.contains(row.id) {
+                fileBusy.remove(row.id)
+                endBusy(row.id)
+                notify(row, "Claude finished in \(f.project).")
+            }
+        }
+        if changed && greeted { pushChats() }
+    }
 
     static func loadCodeRows() -> [Chat] {
         (UserDefaults.standard.array(forKey: "codeRows") as? [[String]] ?? []).compactMap { r in
@@ -1781,7 +2192,15 @@ final class Bridge {
                   "recap": t.help, "text": t.help, "restore": true])
         }
         // Busy chats on other tabs too: the puck remembers tiles it isn't showing, so their timers keep running.
-        for id in busy.keys { send(["t": "turn.started", "agentId": id, "text": "Writing…"]) }
+        for id in busy.keys { sendTurnStarted(id, "Writing…") }
+    }
+
+    /// turn.started, with how long the turn has run for firmware that takes it (pb.7, hello "pb" 6), so the puck's
+    /// "Working" counts from when it began rather than from when the puck heard of it.
+    func sendTurnStarted(_ id: String, _ text: String) {
+        var m: [String: Any] = ["t": "turn.started", "agentId": id, "text": text]
+        if pbFirmware >= 6, let b = busy[id] { m["elapsed"] = max(0, Int(Date().timeIntervalSince(b.since))) }
+        send(m)
     }
 
     func selectTab(_ id: String) {
@@ -2009,6 +2428,15 @@ final class Bridge {
             if let id = msg["id"] as? String { menuTap(id) }
         case "pb.timer.state":
             if let left = msg["seconds"] as? Int { timerEnd = left > 0 ? Date().addingTimeInterval(Double(left)) : nil; publish() }
+        case "pb.alarm.state":
+            // The puck's word on one alarm: seconds to go, 0 once it rang or was cleared (also re-sent after each welcome).
+            guard let id = msg["id"] as? String, !id.isEmpty else { break }
+            let left = msg["in"] as? Int ?? 0
+            alarms.removeAll { $0.id == id }
+            if left > 0 {
+                alarms.append(PuckAlarm(id: id, label: msg["label"] as? String ?? "Alarm", at: Date().addingTimeInterval(Double(left))))
+            }
+            publish()
         case "pb.timer.done":
             timerEnd = nil
             say("Timer: done (\(msg["reason"] as? String ?? "?"))")
@@ -2083,7 +2511,8 @@ final class Bridge {
             // Timers count down on the puck itself; the Mac starts and cancels them.
             let left = timerLeft
             var timer = MenuRow(id: "timer", label: "Timer", value: left.map { String(format: "%d:%02d left", $0 / 60, $0 % 60) } ?? "Off")
-            timer.choices = Bridge.timerMinutes.map { MenuChoice(minutesName($0)) } + (left != nil ? [MenuChoice("Cancel timer")] : [])
+            timer.choices = Bridge.timerMinutes.map { MenuChoice(minutesName($0)) } + (pbFirmware >= 6 ? [MenuChoice("Custom…")] : [])
+                + (left != nil ? [MenuChoice("Cancel timer")] : [])
             timer.index = -1   // no `index`: a duration isn't a current value (the puck would mark it green)
             rows.append(timer)
         }
@@ -2159,7 +2588,10 @@ final class Bridge {
             if index >= 0 && index < Bridge.timerMinutes.count {
                 let m = Bridge.timerMinutes[index]
                 startTimer(minutes: m)
-            } else if index == Bridge.timerMinutes.count && timerEnd != nil {
+            } else if value == "Custom…" || (value == nil && index == Bridge.timerMinutes.count && pbFirmware >= 6) {
+                openTimerDial(seconds: Pref.timerCustom)
+                return   // the puck is on its dial now; the menu waits
+            } else if timerEnd != nil {
                 cancelTimer()
             }
         case "character":
@@ -2202,13 +2634,74 @@ final class Bridge {
     // ---------- timers (they count down on the puck; firmware pb 3) ----------
     var timerEnd: Date?
     func startTimer(minutes m: Int) {
-        guard greeted, pbFirmware >= 3 else { return }
         Pref.timerLast = m
-        timerEnd = Date().addingTimeInterval(Double(m * 60))
-        send(["t": "pb.timer", "seconds": m * 60, "label": "\(minutesName(m)) timer"])
-        say("Timer: \(minutesName(m)) on the puck")
+        startTimer(seconds: m * 60, label: "\(minutesName(m)) timer")
+    }
+    func startTimer(seconds: Int, label: String = "Timer") {
+        guard greeted, pbFirmware >= 3, seconds > 0 else { return }
+        let secs = min(seconds, 24 * 3600 - 1)
+        timerEnd = Date().addingTimeInterval(Double(secs))
+        send(["t": "pb.timer", "seconds": secs, "label": label])
+        say("Timer: \(durationName(secs)) on the puck")
         sendMenu()
         publish()
+    }
+    /// Firmware pb.7: open the puck's timer dial, set to this many seconds.
+    func openTimerDial(seconds: Int) {
+        guard greeted, pbFirmware >= 6 else { return }
+        send(["t": "pb.timerset", "seconds": seconds])
+    }
+
+    // ---------- alarms (they count down on the puck, in RAM; firmware pb.7) ----------
+    var alarms: [PuckAlarm] = []
+    var alarmSeq = 0
+    func setAlarm(at when: Date, label: String) {
+        guard greeted, pbFirmware >= 6 else { return }
+        let secs = Int(when.timeIntervalSinceNow.rounded())
+        guard secs > 0, secs <= 7 * 86400 else { return }
+        if alarms.count >= 4, let soonest = alarms.min(by: { $0.at < $1.at }) { alarms.removeAll { $0.id == soonest.id } }   // the puck's rule
+        alarmSeq += 1
+        let id = "a\(Int(Date().timeIntervalSince1970) % 100000)\(alarmSeq % 10)"
+        let l = String((label.isEmpty ? "Alarm" : label).prefix(23))
+        alarms.append(PuckAlarm(id: id, label: l, at: when))
+        send(["t": "pb.alarm", "id": id, "in": secs, "label": l])
+        say("Alarm: \(alarmTime(when)) on the puck")
+        publish()
+    }
+    func clearAlarm(_ id: String) {
+        guard greeted, pbFirmware >= 6 else { return }
+        alarms.removeAll { $0.id == id }
+        send(["t": "pb.alarm", "id": id, "in": 0])
+        publish()
+    }
+    func clearAlarms() { for a in alarms { clearAlarm(a.id) } }
+    func alarmTime(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = Pref.clock24 ? "HH:mm" : "h:mm a"
+        let w = DateFormatter()
+        w.dateFormat = "EEE"
+        let day = Calendar.current.isDateInToday(d) ? "" : Calendar.current.isDateInTomorrow(d) ? " tomorrow" : " " + w.string(from: d)
+        return f.string(from: d) + day
+    }
+
+    /// A voice command for the puck (VoiceCommand), done here; what the puck shows back.
+    func runVoiceCommand(_ c: VoiceCommand) -> String {
+        switch c {
+        case .timer(let secs):
+            startTimer(seconds: secs)
+            return "Timer: \(durationName(secs))"
+        case .stopTimer:
+            if timerEnd == nil { return "No timer is running" }
+            cancelTimer()
+            return "Timer stopped"
+        case .alarm(let when, let label):
+            setAlarm(at: when, label: label)
+            return "Alarm: \(alarmTime(when))"
+        case .clearAlarms:
+            if alarms.isEmpty { return "No alarms are set" }
+            clearAlarms()
+            return "Alarms cleared"
+        }
     }
     func cancelTimer() {
         guard greeted, pbFirmware >= 3 else { return }
@@ -2553,14 +3046,37 @@ final class Bridge {
                     let textOut = words.trimmingCharacters(in: .whitespacesAndNewlines)
                     if textOut.isEmpty { reply(["t": "voice.error", "message": "Didn't catch that"]); return }
                     say("Voice: heard \(textOut.split(separator: " ").count) words")
-                    self.deliverQueue.async {
-                        let target = self.deliver(textOut, to: turn.agentId, known: known, lastOpened: lastOpened)
-                        reply(["t": "voice.transcript", "routeId": "", "text": textOut,
-                               "agentId": target?.id ?? (turn.agentId ?? "claude"),
-                               "agentName": target?.title ?? "Claude", "needsConfirm": false])
+                    // "Timer 10 minutes", "alarm 7:30": for the puck, not Claude (Puck Bridge firmware).
+                    if Pref.voiceCommands, let cmd = VoiceCommand.parse(textOut) {
+                        self.perform { b in
+                            let timers = b.pbFirmware >= 3, alarms = b.pbFirmware >= 6
+                            switch cmd {
+                            case .timer, .stopTimer: if !timers { b.deliverVoice(textOut, turn, known, lastOpened, reply); return }
+                            case .alarm, .clearAlarms: if !alarms { b.deliverVoice(textOut, turn, known, lastOpened, reply); return }
+                            }
+                            let said = b.runVoiceCommand(cmd)
+                            say("Voice: a command for the puck (\(said))")
+                            var m: [String: Any] = ["t": "voice.transcript", "routeId": "", "text": said,
+                                                    "agentId": turn.agentId ?? "claude", "agentName": "Puck", "needsConfirm": false]
+                            if !turn.upload.isEmpty { m["uploadId"] = turn.upload }
+                            b.send(m)
+                        }
+                        return
                     }
+                    self.deliverVoice(textOut, turn, known, lastOpened, reply)
                 }
             }
+        }
+    }
+
+    /// Voice for Claude: into the chat's message box (deliver), then the transcript back to the puck.
+    func deliverVoice(_ textOut: String, _ turn: VoiceTurn, _ known: Chat?, _ lastOpened: String,
+                      _ reply: @escaping ([String: Any]) -> Void) {
+        deliverQueue.async {
+            let target = self.deliver(textOut, to: turn.agentId, known: known, lastOpened: lastOpened)
+            reply(["t": "voice.transcript", "routeId": "", "text": textOut,
+                   "agentId": target?.id ?? (turn.agentId ?? "claude"),
+                   "agentName": target?.title ?? "Claude", "needsConfirm": false])
         }
     }
 
@@ -2710,15 +3226,20 @@ final class Bridge {
             b.awaySince = nil
             busy[id] = b
         } else {
-            busy[id] = BusyChat(since: now, textsBefore: Set(prev.mainTexts), labels: prev.messageLabels,
+            // A Code session may have been working long before it was opened here: its transcript says since when.
+            var since = now
+            if let c = allRows.first(where: { $0.id == id }), let p = c.project,
+               let t = codeFiles.turnStart(project: p, title: c.title, among: fileSessions, now: now) { since = t }
+            busy[id] = BusyChat(since: since, textsBefore: Set(prev.mainTexts), labels: prev.messageLabels,
                                 prompt: prev.composerText.trimmingCharacters(in: .whitespacesAndNewlines), awaySince: nil)
         }
-        send(["t": "turn.started", "agentId": id, "text": "Writing…"])
+        sendTurnStarted(id, "Writing…")
         nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
     }
 
     func endBusy(_ id: String) {
         busy[id] = nil
+        fileBusy.remove(id)
         send(["t": "turn.done", "agentId": id])
         if writingChat == id { writingChat = nil }
     }
@@ -2756,6 +3277,7 @@ final class Bridge {
         let switchedMode = !first && prev.mode != cur.mode
         if cur.mode == .code {
             let merged = mergeCodeRows(visible: cur.chats, projects: cur.projects.map { $0.name })
+            unfoldedProjects = Set(cur.chats.compactMap { $0.project })
             carryIds(from: codeRows, to: merged)
             let before = codeRows
             codeRows = merged
@@ -2933,7 +3455,7 @@ final class Bridge {
                     busy[r.id] = BusyChat(since: now, textsBefore: [], labels: [], prompt: "", awaySince: now)
                     statusBusy.insert(r.id)
                     say("A Code session in \(r.project ?? "Code") is working (sidebar)")
-                    send(["t": "turn.started", "agentId": r.id, "text": "Working…"])
+                    sendTurnStarted(r.id, "Working…")
                     nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
                 } else if busy[r.id]?.awaySince != nil {
                     busy[r.id]?.awaySince = now   // still visibly working: don't give up on it
@@ -3002,6 +3524,7 @@ final class Bridge {
                 }
             }
             if greeted && now >= nextPing { send(["t": "ping"]); nextPing = now.addingTimeInterval(10) }
+            watchCodeFiles(now: now)
             // The puck forgets a tile is busy 25 s after the last turn.started (ui_prune_stale_busy): keep it fresh so
             // the character keeps working and the small button can still stop Claude.
             if now >= nextBusyRefresh {
@@ -3011,7 +3534,7 @@ final class Bridge {
                     say("Gave up waiting on a chat in the background (20 min)")
                     endBusy(id)
                 }
-                if greeted { for id in busy.keys { send(["t": "turn.started", "agentId": id, "text": "Writing…"]) } }
+                if greeted { for id in busy.keys { sendTurnStarted(id, "Writing…") } }
                 nextBusyRefresh = busy.isEmpty ? .distantFuture : now.addingTimeInterval(10)
             }
             if pendingOpen != nil, now.timeIntervalSince(pendingOpen!.at) > 0.7 { finishPendingOpen() }
@@ -3431,7 +3954,7 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func refreshCode() { bridge.perform { b in if b.greeted { b.pushChats() }; b.publish() } }
+    func refreshCode() { bridge.perform { b in b.nextCodeFiles = .distantPast; if b.greeted { b.pushChats() }; b.publish() } }
 
     // ---------- puck settings ----------
     func setPuck(_ key: String, _ value: Any) {
@@ -3879,6 +4402,11 @@ struct ClockSection: View {
 
 struct PuckPane: View {
     @ObservedObject var model: AppModel
+    @State private var timerH = Pref.timerCustom / 3600
+    @State private var timerM = Pref.timerCustom / 60 % 60
+    @State private var timerS = Pref.timerCustom % 60
+    @State private var alarmAt = Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
+    @State private var alarmLabel = ""
     var body: some View {
         Form {
             if let s = model.snap.puckSettings {
@@ -3934,7 +4462,51 @@ struct PuckPane: View {
                                 Button("Cancel") { model.bridge.perform { $0.cancelTimer() } }
                             }
                         }
-                        Text("The puck counts down by itself (also while this Mac sleeps) and rings at the end. You can also start one on the puck: Settings → Timer.")
+                        if model.snap.pbFirmware >= 6 {
+                            HStack {
+                                Stepper(value: $timerH, in: 0...23) { Text(verbatim: "\(timerH) h") }
+                                Stepper(value: $timerM, in: 0...59) { Text(verbatim: "\(timerM) min") }
+                                Stepper(value: $timerS, in: 0...59, step: 5) { Text(verbatim: "\(timerS) s") }
+                                Spacer()
+                                Button("Start") {
+                                    let secs = timerH * 3600 + timerM * 60 + timerS
+                                    Pref.timerCustom = secs
+                                    model.bridge.perform { $0.startTimer(seconds: secs) }
+                                }
+                                .disabled(timerH * 3600 + timerM * 60 + timerS == 0)
+                            }
+                        }
+                        Text(model.snap.pbFirmware >= 6
+                             ? "The puck counts down by itself (also while this Mac sleeps) and rings at the end. On the puck: tap the line under the clock for the timer dial, or say \"timer 2 hours 15 minutes\" or \"stop the timer\"."
+                             : "The puck counts down by itself (also while this Mac sleeps) and rings at the end. You can also start one on the puck: Settings → Timer.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.snap.pbFirmware >= 6 {
+                    Section("Alarms") {
+                        ForEach(model.snap.alarms) { a in
+                            HStack {
+                                Text(a.at, style: .time).monospacedDigit()
+                                if !Calendar.current.isDateInToday(a.at) { Text(a.at, format: .dateTime.weekday(.abbreviated)).foregroundStyle(.secondary) }
+                                Text(a.label)
+                                Spacer()
+                                Button("Delete") { model.bridge.perform { $0.clearAlarm(a.id) } }
+                            }
+                        }
+                        HStack {
+                            DatePicker("Alarm at", selection: $alarmAt, displayedComponents: .hourAndMinute)
+                            TextField("Label", text: $alarmLabel).frame(maxWidth: 160)
+                            Button("Add") {
+                                // The next time it's this time of day: today, or tomorrow if that's passed.
+                                let c = Calendar.current.dateComponents([.hour, .minute], from: alarmAt)
+                                let when = Calendar.current.nextDate(after: Date(), matching: c, matchingPolicy: .nextTime) ?? alarmAt
+                                let label = alarmLabel
+                                model.bridge.perform { $0.setAlarm(at: when, label: label) }
+                                alarmLabel = ""
+                            }
+                            .disabled(model.snap.alarms.count >= 4)
+                        }
+                        Text("Up to four. They ring on the puck and live in its memory, so unplugging the puck clears them. You can also say \"alarm 7:30 am\", \"alarm in 20 minutes for tea\" or \"cancel my alarms\" to the puck.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -3970,6 +4542,8 @@ struct PuckPane: View {
 struct ClaudePane: View {
     @ObservedObject var model: AppModel
     @AppStorage("codeTabs") private var codeTabs = true
+    @AppStorage("codeFiles") private var codeFiles = true
+    @AppStorage("voiceCommands") private var voiceCommands = true
     @AppStorage("openOnSelect") private var openOnSelect = true
     @AppStorage("bringForward") private var bringForward = false
     @AppStorage("showReply") private var showReply = true
@@ -3983,7 +4557,11 @@ struct ClaudePane: View {
             Section("Claude Code") {
                 Toggle("Show Claude Code sessions as tabs on the puck", isOn: $codeTabs)
                     .onChange(of: codeTabs) { _, _ in model.refreshCode() }
-                Text("Hold the puck's face to switch tabs: Chats, then one per Claude Code project, as Claude's sidebar groups them (folded projects too). Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that, also when you fold a project. Picking a project on the puck switches Claude to its Code view and unfolds that project.")
+                Text("On the puck, swipe left from the clock for your Claude Code projects (with the Classic list style, hold the face for the tabs): one per project, as Claude's sidebar groups them (folded projects too). Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that, also when you fold a project. Picking a project on the puck switches Claude to its Code view and unfolds that project.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("List folded projects' sessions from Claude Code's files", isOn: $codeFiles)
+                    .onChange(of: codeFiles) { _, _ in model.refreshCode() }
+                Text("Claude's sidebar shows no sessions for a folded project. Puck Bridge can read them from Claude Code's session files on this Mac (~/.claude/projects) instead, and see when one is working. Sessions that run in the cloud aren't there, and a title may differ a little from Claude's.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("When Claude finishes") {
@@ -3997,6 +4575,9 @@ struct ClaudePane: View {
                     Text("Type it into Claude, and I'll press Send").tag(false)
                 }
                 .pickerStyle(.radioGroup)
+                Toggle("Timers and alarms by voice (\"timer 10 minutes\", \"alarm 7:30\", \"stop the timer\")", isOn: $voiceCommands)
+                Text("Only something that is just a timer or alarm command goes to the puck; everything else still goes to Claude. Needs Puck Bridge firmware.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

@@ -1,4 +1,4 @@
-# Puck Bridge firmware pb.5: the "compact" list style (pb.ui) on the panes list and the tabs. Browsing switches
+# Puck Bridge firmware pb.5: the "compact" list style (pb.ui) on the panes list and the groups. Browsing switches
 # nothing; a tap on a row opens that pane, a tap on a tab switches to it with the usual handshake.
 log 3
 autoping 1
@@ -33,21 +33,22 @@ tap 233 233 120
 time +300
 expect view AGENT
 expect out {"t":"focus"
-echo --- hold for the tabs: five, in the compact style
-tap 233 233 800
+echo --- (pb.7: a hold on the face talks now) right twice: the list, then the groups, in the compact style
+swipe 120 233 330 233 250
 time +300
-expect view TABS
+expect view AGENTS
+swipe 120 233 330 233 250
+time +300
+expect view GROUPS
 shot out/renders/lists_compact_tabs.png
-echo --- browsing the tabs switches nothing
+echo --- browsing the groups switches nothing
 mark
-swipe 233 280 233 222 500
+swipe 233 280 233 225 500
 time +700
-swipe 233 280 233 222 500
-time +700
-expect view TABS
+expect view GROUPS
 expect noout swarm.select
 shot out/renders/lists_compact_tabs_moved.png
-echo --- a tap on the chosen tab switches to it
+echo --- a tap on the chosen group switches to it
 mark
 tap 233 233 120
 time +200
@@ -60,9 +61,11 @@ in {"t":"agent","id":"cc-4","name":"Write the release notes","project":"openharn
 in {"t":"agents.end","total":1,"tab":"code-b2"}
 in {"t":"focus","agentId":"cc-4","keepClock":true}
 time +400
-expect view HOME
+expect view AGENTS
 echo --- classic again: the official pages come back
 in {"t":"pb.ui","lists":"classic"}
+tap 233 233 120
+time +300
 tap 233 233 800
 time +300
 expect view TABS
