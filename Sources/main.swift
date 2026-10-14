@@ -4774,7 +4774,7 @@ struct ClockSection: View {
     var body: some View {
         Section("Clock face") {
             if model.snap.puckConnected && model.snap.pbFirmware < 1 {
-                Text("Needs Puck Bridge firmware (above).").font(.caption).foregroundStyle(.secondary)
+                Text("Needs Puck Bridge firmware (Firmware, below).").font(.caption).foregroundStyle(.secondary)
             }
             Picker("Show the clock when idle for", selection: Binding(get: { Pref.idleMin }, set: { Pref.idleMin = $0; model.clockChanged(); model.objectWillChange.send() })) {
                 Text("Never (small button only)").tag(0)

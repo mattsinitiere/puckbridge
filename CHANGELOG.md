@@ -14,6 +14,7 @@ A full UX review of the puck and the Mac app (four reviews: puck visuals, puck f
 - The Mac app no longer stalls on a busy Claude (1.5 s limit per Accessibility call), which could make the puck say "No answer from the Mac".
 - OpenHarness is kept from starting at login while Puck Bridge has the puck (it could put the stock firmware back after a reboot); if the stock firmware does come back, Puck Bridge says so and offers to reinstall.
 - Out-of-date help text ("Hold the puck's face to see its tabs").
+- Settings → Puck → Clock face pointed to the firmware section "above"; it is below.
 - Puck screen overlaps found by the full screen gallery: a Claude Code session's project name ran across the pet over a reply card (now hidden there), the next-alarm line touched the pet, and the connecting screen's hint was cut off (firmware pb.9).
 ### Added
 - **The clock keeps time without the Mac** (asleep or unplugged): it stays up, dimmed, with "Waiting for your Mac".
