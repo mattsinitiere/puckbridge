@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+
+## [0.8.3] - 2026-10-14
 ### Added
 - **Custom timers on the puck** (Puck Bridge firmware 0.0.88-pb.7): tap the line under the clock for a **timer dial** (hours, minutes, seconds; tap + / − or drag a column), then Start. Tap the timer's line while it runs to see the time left and **Stop** it early. Also from the Mac (Settings → Puck → Timer: any hours, minutes and seconds) and the puck's Settings → Timer → **Custom…**.
 - **Alarms** (firmware pb.7): up to four, set in Settings → Puck → Alarms or by voice. They ring on the puck (ALARM, the label, the time) and live in its memory, so **unplugging the puck clears them**.
