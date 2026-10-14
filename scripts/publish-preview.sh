@@ -15,6 +15,8 @@ NOTES="${RUNNER_TEMP:-/tmp}/preview-notes.md"
   echo "summary: $(git log -1 --format=%s | tr -d '\r')"
 } > "$NOTES"
 gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
-gh release create "$TAG" dist/PuckBridge.zip --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+EXTRA=()
+[ -f dist/MacScreenshots.zip ] && EXTRA+=(dist/MacScreenshots.zip)   # pictures of the Mac app's windows (sample data)
+gh release create "$TAG" dist/PuckBridge.zip ${EXTRA[@]+"${EXTRA[@]}"} --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
   --target "$GITHUB_SHA" --title "Preview: $GITHUB_REF_NAME" --notes-file "$NOTES"
 echo "✓ Published $TAG ($VERSION)"

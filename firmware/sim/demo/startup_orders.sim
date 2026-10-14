@@ -12,7 +12,8 @@ expect view CLOCK
 state
 shot out/renders/startup_clock.png
 include demo/lib/drop.sim
-expect view HOME
+# pb.8: the clock stays without the Mac (it keeps its own time from ambient's secs)
+expect view CLOCK
 echo === B. reconnect: list, focus (keepClock), sound, ambient
 include demo/lib/welcome.sim
 include demo/lib/swarms_chats.sim

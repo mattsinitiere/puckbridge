@@ -5,7 +5,8 @@ Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop**
 - Your recent Claude chats appear on the puck, and your Claude Code sessions too, one tab per project. Pause on one → Claude opens it.
 - Claude finishes a reply → the puck beeps and shows the start of the reply.
 - Tap-and-speak (or hold-to-talk) on the puck → transcribed on your Mac → typed into the chat and sent.
-- Timers and alarms on the puck: a timer dial on the puck, the Mac's Settings, or just say "timer 10 minutes" or "alarm 7:30 am".
+- Timers and alarms on the puck: a timer dial on the puck, the Mac's Settings, or just say "timer 10 minutes" or "alarm 7:30 am". They ring even with the chime off, snooze with a tap, and come back if the puck is unplugged.
+- The puck's clock keeps time when the Mac sleeps, and tells you when something is wrong on the Mac ("Allow Accessibility on your Mac").
 - Small (bottom) button while Claude is writing → stop Claude.
 - Pick the little character on the puck (Clawd, Codex Bot, Jolly, Fo), or import your own petdex sprite sheet.
 - Change the puck's brightness, beep and more from ◎ → **Settings…**, or from the puck's **Settings** tab (hold the puck's face to switch tabs).

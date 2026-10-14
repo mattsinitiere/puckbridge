@@ -29,7 +29,7 @@ expect noout {"t":"focus"
 shot out/renders/lists_compact_chats_moved.png
 echo --- a tap on the chosen row opens it (its face)
 mark
-tap 233 233 120
+tap 233 184 120
 time +300
 expect view AGENT
 expect out {"t":"focus"
@@ -50,7 +50,7 @@ expect noout swarm.select
 shot out/renders/lists_compact_tabs_moved.png
 echo --- a tap on the chosen group switches to it
 mark
-tap 233 233 120
+tap 233 184 120
 time +200
 expect out {"t":"swarm.select","swarmId":"code-b2"}
 include demo/lib/lists_swarms_b2.sim
@@ -64,7 +64,7 @@ time +400
 expect view AGENTS
 echo --- classic again: the official pages come back
 in {"t":"pb.ui","lists":"classic"}
-tap 233 233 120
+tap 233 184 120
 time +300
 tap 233 233 800
 time +300

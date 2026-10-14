@@ -6,6 +6,43 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-14
+A full UX review of the puck and the Mac app (four reviews: puck visuals, puck flows, the Mac app, day-to-day use) and the fixes. Puck Bridge firmware **0.0.88-pb.9**.
+### Fixed
+- **Timers and alarms ring even when the finish chime is off.** A fresh puck ships with it off, so alarms rang silently.
+- **No more false "finished":** Claude Code sessions are followed in their transcripts, so a long build or test run no longer looks done after 45 s of quiet; a chat given up on after 20 minutes in the background now says "Lost track of this chat" instead of looking finished.
+- **Voice tells the truth:** if the words don't reach Claude the puck says so (it used to show them as sent); if something is already typed in Claude's box, your words are added and **not** sent.
+- **Alarms and a running timer survive an unplug or a puck restart:** the Mac re-sends them when the puck comes back, and tells you on the Mac if one came due while it was away.
+- The Mac app no longer stalls on a busy Claude (1.5 s limit per Accessibility call), which could make the puck say "No answer from the Mac".
+- OpenHarness is kept from starting at login while Puck Bridge has the puck (it could put the stock firmware back after a reboot); if the stock firmware does come back, Puck Bridge says so and offers to reinstall.
+- Out-of-date help text ("Hold the puck's face to see its tabs").
+- Settings → Puck → Clock face pointed to the firmware section "above"; it is below.
+- Puck screen overlaps found by the full screen gallery: a Claude Code session's project name ran across the pet over a reply card (now hidden there), the next-alarm line touched the pet, and the connecting screen's hint was cut off (firmware pb.9).
+### Added
+- **The clock keeps time without the Mac** (asleep or unplugged): it stays up, dimmed, with "Waiting for your Mac".
+- **A finished chat is a line on the clock** ("Grocery list is ready", tap it to open) instead of taking the clock away.
+- **Active** leads the Claude Code groups on the puck: everything working or with a reply waiting, across all projects.
+- **Health on the puck and in Settings:** "Allow Accessibility on your Mac", "Claude isn't open", "Open Claude's window" show on the puck's clock and in Settings → General → Health, each with a fix button.
+- **Alarms:** tap to **snooze** 9 minutes (Stop is its own button), a missed alarm stays on the clock and in Notifications, and the next alarm shows under the clock.
+- **Timer:** a running timer shows as a draining ring with **+1 min** and Stop; the dial has 5/10/15/25/45-minute presets and a "<" back.
+- **Hold to talk** fills a ring until a release sends ("Keep holding", then "Release to send"); **slide away to cancel**. The voice screen shows whom you're talking to and "Tap to send".
+- **Stop:** a working chat's face says "Hold the small button to stop" (the first few times), "Stopping" after, and "Claude already finished" if it's too late; a held small button on the clock stops the chat that started last.
+- **Say "stop Claude"** (or "cancel that") to stop it. Chat and project names are given to speech recognition so they're heard right.
+- Swipe hints on the clock (Notifications, Settings, Code) the first few times; a stopwatch beside the line that opens the timer.
+- **Reset and Allow Again** (Settings → General) for when macOS forgets Accessibility after an update; the Setup window says so after an update.
+- Asks once whether to turn on the finish chime when a new puck connects; a Test button next to Sound.
+- A Mac notification when Claude finishes (or an alarm is due) and the puck isn't plugged in (Settings → Claude & Voice).
+- A **Timers** tab in Settings (timer and alarms).
+- **Pictures of every screen:** `firmware/sim/tools/gallery.py` renders all 37 puck screens in dark and light (`demo/gallery_*.sim`, contact sheets with `--sheets`); `PuckBridge --screenshots <dir>` draws every Mac window (each Settings pane, at window size and full length, the Setup pages, the helper card) with sample data, and each preview build attaches them as `MacScreenshots.zip`.
+- `firmware/sim/demo/pb8.sim`; the simulator fails a test whose screen overflows (a screen holds 40 shapes and the rest silently went undrawn).
+### Changed
+- **Easier to read:** hints and secondary text are brighter (about 6:1 instead of 2.4-3.9:1); the **Cards** list shows three items instead of about one and a half; a thin scroll bar on the right edge replaces "2 of 5".
+- **Orange always means working**, also on the face (it was neon green there); green only marks what's chosen, and is softer.
+- **Light mode** has real contrast (hint text about 7:1, darker greens and oranges).
+- The timer and alarm screens say what rang once, large, instead of "TIMER / Time's up / Timer / 0:00"; the connecting screen moves and says which wait it is.
+- A right swipe on the clock does nothing (it opened a chat); "Listening" no longer fades to almost nothing.
+- Settings: a Health section, plain wording ("Puck connected", "Autonomous's firmware"), honest firmware install text with a progress bar, Restore disabled when it's already on Autonomous's firmware, OpenHarness settings only when it's installed, "Take the Puck Back" in the menu, the Setup window remembers skipped steps and only says "You're all set" when you are.
+
 ## [0.8.3] - 2026-10-14
 ### Added
 - **Custom timers on the puck** (Puck Bridge firmware 0.0.88-pb.7): tap the line under the clock for a **timer dial** (hours, minutes, seconds; tap + / − or drag a column), then Start. Tap the timer's line while it runs to see the time left and **Stop** it early. Also from the Mac (Settings → Puck → Timer: any hours, minutes and seconds) and the puck's Settings → Timer → **Custom…**.

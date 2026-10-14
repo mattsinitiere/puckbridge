@@ -24,14 +24,36 @@ mark
 in {"t":"pb.alarm","id":"a2","in":0}
 expect out {"t":"pb.alarm.state","id":"a2","in":0
 echo --- a1 rings at its time, with the clock's time
-in {"t":"ambient","time":"7:30","ampm":"AM","date":"Wednesday, Oct 14","temp":"61°","cond":"Clear","hilo":"H 72°  L 55°","idleMin":5}
+in {"t":"ambient","time":"7:30","ampm":"AM","date":"Wednesday, Oct 14","temp":"61°","cond":"Clear","hilo":"H 72°  L 55°","idleMin":5,"secs":27000,"h24":false}
 mark
 time +121000
 expect view TIMER
 expect out {"t":"pb.alarm.state","id":"a1","in":0
 shot out/renders/alarm_ringing.png
-echo --- a touch stops it, and no pb.timer.done (that is the timer's)
+echo --- it rings with the finish beep muted (pb.8): the sound is the preview path, not the muted beep
+echo --- a tap anywhere but Stop snoozes it (pb.8): 9 more minutes, and the Mac is told
 mark
 tap 233 233
 expect view CLOCK
+expect out {"t":"pb.alarm.done","id":"a1","label":"Stand-up","reason":"snoozed"}
+expect out {"t":"pb.alarm.state","id":"a1","in":540
+time +2000
+shot out/renders/alarm_clock_pending.png
+time +539000
+expect view TIMER
+echo --- Stop stops it
+mark
+tap 316 346 100
+expect view CLOCK
+expect out {"t":"pb.alarm.done","id":"a1","label":"Stand-up","reason":"stopped"}
 expect noout pb.timer.done
+echo --- one that rings a minute with nobody there: missed, on the clock until touched
+in {"t":"pb.alarm","id":"a3","in":5,"label":"Laundry"}
+time +6000
+expect view TIMER
+mark
+time +61000
+expect view CLOCK
+expect out {"t":"pb.alarm.done","id":"a3","label":"Laundry","reason":"timeout"}
+time +120000
+shot out/renders/alarm_missed_clock.png
