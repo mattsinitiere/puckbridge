@@ -5,7 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
-A full UX review of the puck and the Mac app (four reviews: puck visuals, puck flows, the Mac app, day-to-day use) and the fixes. Puck Bridge firmware **0.0.88-pb.8**.
+A full UX review of the puck and the Mac app (four reviews: puck visuals, puck flows, the Mac app, day-to-day use) and the fixes. Puck Bridge firmware **0.0.88-pb.9**.
 ### Fixed
 - **Timers and alarms ring even when the finish chime is off.** A fresh puck ships with it off, so alarms rang silently.
 - **No more false "finished":** Claude Code sessions are followed in their transcripts, so a long build or test run no longer looks done after 45 s of quiet; a chat given up on after 20 minutes in the background now says "Lost track of this chat" instead of looking finished.
@@ -14,6 +14,7 @@ A full UX review of the puck and the Mac app (four reviews: puck visuals, puck f
 - The Mac app no longer stalls on a busy Claude (1.5 s limit per Accessibility call), which could make the puck say "No answer from the Mac".
 - OpenHarness is kept from starting at login while Puck Bridge has the puck (it could put the stock firmware back after a reboot); if the stock firmware does come back, Puck Bridge says so and offers to reinstall.
 - Out-of-date help text ("Hold the puck's face to see its tabs").
+- Puck screen overlaps found by the full screen gallery: a Claude Code session's project name ran across the pet over a reply card (now hidden there), the next-alarm line touched the pet, and the connecting screen's hint was cut off (firmware pb.9).
 ### Added
 - **The clock keeps time without the Mac** (asleep or unplugged): it stays up, dimmed, with "Waiting for your Mac".
 - **A finished chat is a line on the clock** ("Grocery list is ready", tap it to open) instead of taking the clock away.
@@ -29,6 +30,7 @@ A full UX review of the puck and the Mac app (four reviews: puck visuals, puck f
 - Asks once whether to turn on the finish chime when a new puck connects; a Test button next to Sound.
 - A Mac notification when Claude finishes (or an alarm is due) and the puck isn't plugged in (Settings → Claude & Voice).
 - A **Timers** tab in Settings (timer and alarms).
+- **Pictures of every screen:** `firmware/sim/tools/gallery.py` renders all 37 puck screens in dark and light (`demo/gallery_*.sim`, contact sheets with `--sheets`); `PuckBridge --screenshots <dir>` draws every Mac window (each Settings pane, at window size and full length, the Setup pages, the helper card) with sample data, and each preview build attaches them as `MacScreenshots.zip`.
 - `firmware/sim/demo/pb8.sim`; the simulator fails a test whose screen overflows (a screen holds 40 shapes and the rest silently went undrawn).
 ### Changed
 - **Easier to read:** hints and secondary text are brighter (about 6:1 instead of 2.4-3.9:1); the **Cards** list shows three items instead of about one and a half; a thin scroll bar on the right edge replaces "2 of 5".

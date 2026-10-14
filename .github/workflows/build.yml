@@ -134,6 +134,15 @@ jobs:
           done
           "$RUNNER_TEMP/check_pet_pack" "$RUNNER_TEMP"/*.hpet
 
+      # Pictures of every window of the Mac app with sample data (PuckBridge --screenshots), attached to the preview
+      # as MacScreenshots.zip. Never fails the build: a window server hiccup on the runner only loses the pictures.
+      - name: Screenshots of the Mac app
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          "build/Puck Bridge.app/Contents/MacOS/PuckBridge" --screenshots "$RUNNER_TEMP/MacScreenshots"
+          ditto -c -k --keepParent "$RUNNER_TEMP/MacScreenshots" dist/MacScreenshots.zip
+
       - name: Publish as a preview (Puck Bridge → Settings → General → Beta Access)
         if: github.event_name != 'pull_request'
         env:
@@ -147,4 +156,5 @@ jobs:
           path: |
             dist/PuckBridge.zip
             dist/PuckBridge.dmg
+            dist/MacScreenshots.zip
           retention-days: 7

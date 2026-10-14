@@ -4118,6 +4118,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshPermissions() {
+        if Screenshots.on { return }
         let ax = AXIsProcessTrusted(), sp = SFSpeechRecognizer.authorizationStatus(), login = SMAppService.mainApp.status
         if ax != axTrusted { axTrusted = ax; onChange?() }
         if sp != speech { speech = sp }
@@ -5222,6 +5223,144 @@ struct HelperCard: View {
     }
 }
 
+// ---------- screenshots (CI): every window of the app, with sample data ----------
+/// `PuckBridge --screenshots <dir>`: each Settings pane as the window shows it and at full length, the Setup pages, the
+/// Accessibility helper card, in light and dark, as PNGs. Sample data only: no bridge loop, no puck, no Claude, no
+/// permission prompts. The Build workflow attaches them to the branch's preview release.
+enum Screenshots {
+    static var on = false   // AppModel stops polling permissions, so the sample's stay put
+
+    static func run(_ dir: String) {
+        on = true
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.finishLaunching()
+        let out = URL(fileURLWithPath: dir)
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let model = AppModel(bridge: Bridge(), updater: Updater())
+        let panes: [(SettingsTab, String)] = [(.general, "general"), (.character, "character"), (.puck, "puck"),
+                                              (.timers, "timers"), (.claude, "claude_and_voice"), (.advanced, "advanced")]
+        for (theme, look) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            app.appearance = NSAppearance(named: look)
+            var n = 0
+            func shot<V: View>(_ name: String, _ view: V, width: CGFloat, height: CGFloat? = nil, trim: Bool = false) {
+                n += 1
+                render(view, width: width, height: height, trim: trim,
+                       to: out.appendingPathComponent(String(format: "%@_%02d_%@.png", theme, n, name)))
+            }
+            // Everything working: the window as it opens on each tab, then each pane at full length.
+            healthy(model)
+            for (tab, name) in panes {
+                model.tab = tab
+                shot("window_\(name)", SettingsView(model: model), width: 620, height: 560)
+            }
+            shot("full_general", GeneralPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_character", CharacterPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_puck", PuckPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_timers", TimersPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_claude_and_voice", ClaudePane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_advanced", AdvancedPane(model: model), width: 620, height: 2400, trim: true)
+            // Things wrong: no puck, Claude closed, Accessibility off; then a puck on Autonomous's firmware.
+            var s = model.snap
+            s.puck = "Puck: not found"; s.puckConnected = false; s.claudeRunning = false; s.puckSettings = nil
+            s.pbFirmware = 0; s.timerEnd = nil; s.alarms = []
+            model.snap = s; model.axTrusted = false
+            shot("full_general_problems", GeneralPane(model: model), width: 620, height: 2400, trim: true)
+            healthy(model)
+            s = model.snap
+            s.pbFirmware = 0; s.fw = "0.0.88"; s.timerEnd = nil; s.alarms = []
+            s.puckSettings = PuckSettings(["brightness": 60, "muted": true, "quiet": false, "scrollReversed": false, "voiceLang": "en-US"])
+            model.snap = s
+            shot("full_general_official_firmware", GeneralPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_puck_official_firmware", PuckPane(model: model), width: 620, height: 2400, trim: true)
+            shot("full_timers_official_firmware", TimersPane(model: model), width: 620, height: 2400, trim: true)
+            // The Setup window, page by page.
+            healthy(model)
+            model.axTrusted = false; model.speech = .notDetermined
+            shot("setup_accessibility", SetupView(model: model, close: {}), width: 460)
+            model.justUpdated = true
+            shot("setup_accessibility_after_update", SetupView(model: model, close: {}), width: 460)
+            model.justUpdated = false
+            model.axTrusted = true
+            shot("setup_speech", SetupView(model: model, close: {}), width: 460)
+            model.speech = .authorized
+            Pref.weatherOn = true; Pref.pbInstalled = true
+            if !model.locationAllowed { shot("setup_location", SetupView(model: model, close: {}), width: 460) }
+            model.skipped = [.location]
+            if !model.locationAllowed { shot("setup_almost_there", SetupView(model: model, close: {}), width: 460) }
+            model.skipped = []
+            Pref.weatherOn = false
+            shot("setup_all_set", SetupView(model: model, close: {}), width: 460)
+            shot("accessibility_helper_card", HelperCard(), width: 270)
+        }
+        exit(0)
+    }
+
+    /// A puck on Puck Bridge firmware, Claude open, every permission given, a timer and two alarms running.
+    static func healthy(_ m: AppModel) {
+        var s = Snapshot()
+        s.puck = "Puck: connected"; s.puckConnected = true
+        s.claude = "Claude: 14 chats · 9 Code sessions"; s.claudeRunning = true; s.axTrusted = true
+        s.fw = FirmwareImage.bundled?.version ?? "0.0.88-pb.9"; s.hw = "harness"; s.pbFirmware = 7; s.petsSupported = true
+        s.puckSettings = PuckSettings(["brightness": 60, "muted": false, "quiet": false, "scrollReversed": false, "voiceLang": "en-US"])
+        s.timerEnd = Date().addingTimeInterval(14 * 60 + 59)
+        s.alarms = [PuckAlarm(id: "a1", label: "Stand-up", at: Date().addingTimeInterval(3600)),
+                    PuckAlarm(id: "a2", label: "Tea", at: Date().addingTimeInterval(2 * 3600))]
+        m.snap = s
+        m.axTrusted = true; m.speech = .authorized; m.skipped = []
+        Pref.weatherOn = false   // the runner has no location permission to show
+    }
+
+    static func render<V: View>(_ view: V, width: CGFloat, height: CGFloat?, trim: Bool, to file: URL) {
+        let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+        var size = NSSize(width: width, height: height ?? 900)
+        if height == nil {
+            host.frame.size = size
+            size.height = max(40, host.fittingSize.height)
+        }
+        let w = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        w.contentView = host
+        w.setContentSize(size)
+        w.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))   // SwiftUI lays out on the run loop
+        host.layoutSubtreeIfNeeded()
+        defer { w.orderOut(nil) }
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        guard var cg = rep.cgImage else { return }
+        if trim, let cut = trimmed(cg, scale: CGFloat(cg.width) / width) { cg = cut }
+        guard let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: file)
+        print("screenshot \(file.lastPathComponent) \(cg.width)×\(cg.height)")
+    }
+
+    /// The image cut 24 pt under the last row that isn't the form's background (taken from the bottom-left corner).
+    static func trimmed(_ cg: CGImage, scale: CGFloat) -> CGImage? {
+        let w = cg.width, h = cg.height
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let done: Bool = px.withUnsafeMutableBytes { buf in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard done else { return nil }
+        let bottom = (h - 1) * w * 4 + 8   // memory row 0 is the image's top
+        let bg = Array(px[bottom ..< bottom + 4])
+        var last = h - 1
+        rows: while last > 0 {
+            let row = last * w * 4
+            for x in stride(from: 0, to: w * 4, by: 4) {
+                for c in 0 ..< 3 where abs(Int(px[row + x + c]) - Int(bg[c])) > 6 { break rows }
+            }
+            last -= 1
+        }
+        let keep = min(h, last + 1 + Int(24 * scale))
+        return cg.cropping(to: CGRect(x: 0, y: 0, width: w, height: keep))
+    }
+}
+
 // ============================================================================================
 // MARK: Menu-bar app
 // ============================================================================================
@@ -5407,9 +5546,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 // ============================================================================================
-// MARK: Command line (used by CI): PuckBridge --make-pet <sheet.png> <out.hpet> [version]
+// MARK: Command line (used by CI): PuckBridge --make-pet <sheet.png> <out.hpet> [version] | --screenshots <dir>
 // ============================================================================================
 let argv = CommandLine.arguments
+if argv.count >= 3 && argv[1] == "--screenshots" { Screenshots.run(argv[2]) }
 if argv.count >= 4 && argv[1] == "--make-pet" {
     do {
         let data = try Data(contentsOf: URL(fileURLWithPath: argv[2]))
