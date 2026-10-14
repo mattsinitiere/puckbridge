@@ -24,7 +24,7 @@ mark
 in {"t":"pb.alarm","id":"a2","in":0}
 expect out {"t":"pb.alarm.state","id":"a2","in":0
 echo --- a1 rings at its time, with the clock's time
-in {"t":"ambient","time":"7:30","ampm":"AM","date":"Wednesday, Oct 14","temp":"61°","cond":"Clear","hilo":"H 72°  L 55°","idleMin":5}
+in {"t":"ambient","time":"7:30","ampm":"AM","date":"Wednesday, Oct 14","temp":"61°","cond":"Clear","hilo":"H 72°  L 55°","idleMin":5,"secs":27000,"h24":false}
 mark
 time +121000
 expect view TIMER
