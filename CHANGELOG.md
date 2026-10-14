@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+
+## [0.8.1] - 2026-10-14
 ### Added
 - **Characters in iCloud Drive:** your imported characters are kept in iCloud Drive too (Puck Bridge → Characters), so importing them once puts them on every Mac signed in to your iCloud. Removing one removes it everywhere. Settings → Character → "Keep them in iCloud Drive" turns it off. They stay private: never in this app's repo or releases.
 ### Changed
