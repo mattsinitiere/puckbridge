@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-10-14
 ### Added
 - **Puck Bridge firmware 0.0.88-pb.2** (`firmware/patches/0001-puck-bridge-firmware.patch`, replacing the pb.1 patch):
   - **Side pages:** Settings ← Clock → your chats. Swipe right from the first chat to reach the clock, right again for Settings; swipe up on a chat for the list of all chats. Dots show where you are.
