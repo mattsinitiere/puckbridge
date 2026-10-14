@@ -1,0 +1,67 @@
+# Puck Bridge firmware pb.7 (owner 2026-10-14): custom timers on the puck. A tap on the clock's weather line opens
+# the timer dial (hours, minutes, seconds: + and -, or a drag up and down a column); Start sets it and goes to the
+# clock; a tap on the timer's line opens the dial again with Stop. The Mac's Custom… (pb.timerset) opens the dial
+# set to its value. A swipe right goes back to the clock.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+time +300
+boot tap
+time +300
+expect view CLOCK
+echo --- a tap on the weather line: the dial, at 5 min the first time
+tap 233 262 120
+time +200
+expect view TIMERSET
+shot out/renders/timer_dial.png
+echo --- + on the hours, + + on the minutes (wrapping 59 -> 0 is the minus side), + 30 times on the seconds by drag
+tap 128 148 100
+tap 233 148 100
+tap 233 148 100
+swipe 338 300 338 140 600
+time +200
+shot out/renders/timer_dial_set.png
+echo --- a drag that turned a column is not also a press
+expect view TIMERSET
+echo --- Start: 1 h 7 min 6 s (the drag's first px pick its axis), on the clock
+mark
+tap 233 372 120
+time +200
+expect view CLOCK
+expect out {"t":"pb.timer.state","seconds":4026}
+time +1200
+shot out/renders/timer_clock_running.png
+echo --- a tap on the timer's line: the dial, with the time left and Stop
+tap 233 262 120
+time +200
+expect view TIMERSET
+shot out/renders/timer_dial_running.png
+echo --- a swipe right goes back; the timer runs on
+swipe 120 233 330 233 250
+time +200
+expect view CLOCK
+echo --- Stop cancels it
+tap 233 262 120
+time +200
+mark
+tap 148 372 120
+time +200
+expect view CLOCK
+expect out {"t":"pb.timer.state","seconds":0}
+echo --- the Mac's Custom…: the dial, set to 2 h 15 min
+in {"t":"pb.timerset","seconds":8100}
+time +200
+expect view TIMERSET
+shot out/renders/timer_dial_custom.png
+mark
+tap 233 372 120
+expect out {"t":"pb.timer.state","seconds":8100}
+expect view CLOCK
+echo --- the small button leaves the dial too
+tap 233 262 120
+expect view TIMERSET
+boot tap
+expect view CLOCK

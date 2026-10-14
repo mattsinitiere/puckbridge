@@ -1,0 +1,35 @@
+# Puck Bridge firmware pb.7: hold to talk on the face (clock-home navigation), in place of hold-for-tabs. A still
+# finger for 450 ms starts voice; its release sends. A release before 900 ms was a slow tap: the microphone stays
+# open and a tap sends, as before. A quick tap still talks.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+time +300
+boot tap
+tap 233 200 100
+time +300
+expect view HOME
+shot out/renders/hold_talk_face.png
+echo --- hold 2 s: voice opens while held, and the release sends
+touch down 233 233
+time +600
+expect view VOICE
+time +1400
+shot out/renders/hold_talk_listening.png
+touch up 233 233
+time +100
+state
+expect view VOICE
+time +70000
+boot tap
+echo --- a slow tap (600 ms): voice stays open for a tap to send
+tap 233 200 100
+time +300
+tap 233 233 600
+time +300
+expect view VOICE
+tap 233 233 80
+time +300

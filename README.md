@@ -4,11 +4,36 @@ Menu-bar app that connects the **Autonomous Harness puck** to **Claude Desktop**
 
 - Your recent Claude chats appear on the puck, and your Claude Code sessions too, one tab per project. Pause on one → Claude opens it.
 - Claude finishes a reply → the puck beeps and shows the start of the reply.
-- Tap-and-speak on the puck → transcribed on your Mac → typed into the chat and sent.
+- Tap-and-speak (or hold-to-talk) on the puck → transcribed on your Mac → typed into the chat and sent.
+- Timers and alarms on the puck: a timer dial on the puck, the Mac's Settings, or just say "timer 10 minutes" or "alarm 7:30 am".
 - Small (bottom) button while Claude is writing → stop Claude.
 - Pick the little character on the puck (Clawd, Codex Bot, Jolly, Fo), or import your own petdex sprite sheet.
 - Change the puck's brightness, beep and more from ◎ → **Settings…**, or from the puck's **Settings** tab (hold the puck's face to switch tabs).
 - Updates itself from this repo's Releases.
+
+## On the puck
+
+Screens from the Puck Bridge firmware (rendered by its simulator, `firmware/sim`). The clock is home: swipe **down** for notifications, **up** for settings, **left** for your Claude Code groups and **left again** for your chats; **right** goes back. Tap a group for its sessions, tap a session to open it on the puck (Claude opens it in the background).
+
+| | Clock | Notifications | Settings | Claude Code groups | A group's sessions | A session | Chats |
+|---|---|---|---|---|---|---|---|
+| **Dark** | ![](docs/screenshots/dark-clock.png) | ![](docs/screenshots/dark-notifications.png) | ![](docs/screenshots/dark-settings.png) | ![](docs/screenshots/dark-groups.png) | ![](docs/screenshots/dark-sessions.png) | ![](docs/screenshots/dark-face.png) | ![](docs/screenshots/dark-chats.png) |
+| **Light** | ![](docs/screenshots/light-clock.png) | ![](docs/screenshots/light-notifications.png) | ![](docs/screenshots/light-settings.png) | ![](docs/screenshots/light-groups.png) | ![](docs/screenshots/light-sessions.png) | ![](docs/screenshots/light-face.png) | ![](docs/screenshots/light-chats.png) |
+
+Three list styles (Settings → **Lists**, or on the puck): **Cards** (above), **Dial** and **Compact list**. **Appearance**: Dark, Light or Match Mac.
+
+| Cards | Dial | Compact list |
+|---|---|---|
+| ![](docs/screenshots/dark-groups.png) | ![](docs/screenshots/dark-dial.png) | ![](docs/screenshots/dark-compact.png) |
+| ![](docs/screenshots/light-groups.png) | ![](docs/screenshots/light-dial.png) | ![](docs/screenshots/light-compact.png) |
+
+Timers and alarms (Puck Bridge firmware pb.7): tap the line under the clock for the timer dial, or say "timer 2 hours 15 minutes", "stop the timer", "alarm 7:30 am". Hold the face to talk; let go to send.
+
+| Timer dial | Timer running | Alarm |
+|---|---|---|
+| ![](docs/screenshots/dark-timer.png) | ![](docs/screenshots/dark-timer-running.png) | ![](docs/screenshots/dark-alarm.png) |
+
+Session rows show what each is doing: orange **Working · 1:23**, **Reply ready**, or its pull request (**PR #9 merged** purple, **PR #12 open** green, **closed** red). To refresh these pictures: `scripts/test-firmware.sh`, then `python3 firmware/sim/tools/readme_shots.py`.
 
 ## Install on a Mac
 Download **PuckBridge.dmg** from the [latest release](https://github.com/mattsinitiere/puckbridge/releases/latest), open it, and drag Puck Bridge onto Applications. The first time, if macOS says it can't check the app, open System Settings → Privacy & Security and click **Open Anyway**.
@@ -24,7 +49,8 @@ The first time it opens, a small **Set Up Puck Bridge** window walks you through
 
 ## Puck Bridge firmware (clock, side pages, settings, sounds)
 ◎ → Settings… → **Puck** → **Firmware** → **Install…** puts Puck Bridge's firmware on the puck over the USB cable (about a minute; keep it plugged in). **Restore…** in the same place puts Autonomous's official firmware back. What it adds:
-- **Side pages:** Settings ← Clock → your chats. Swipe sideways to move, swipe up on a chat for the list of all of them.
+- **Clock-home navigation** (with the Cards, Dial or Compact list style): down = notifications, up = settings, left = Claude Code groups, left again = chats, right = back. Hold the face to talk.
+- **Timers and alarms:** a timer dial (tap the line under the clock), Stop before it rings, and up to four alarms (cleared when you unplug the puck). **Classic** keeps the older side pages (Settings ← Clock → your chats).
 - **Clock home screen:** big time, date, weather, your character, and a ring with one segment per chat (orange while Claude works, white when a reply is waiting). It comes up after 5 idle minutes, and the small button always goes there.
 - **Settings on the puck:** character (pick from animated previews), sound, volume, brightness, calm mode, clock delay, 24-hour, weather.
 - **Small button:** tap → clock · hold while Claude writes → stop.

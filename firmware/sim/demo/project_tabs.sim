@@ -1,0 +1,37 @@
+# Puck Bridge 0.8.3: one tab per Claude Code project. More than three tabs: the firmware's carousel (not the cards);
+# a browsed page is selected with the usual handshake (swarm.select -> swarms -> agents.refresh -> agents.end {tab}).
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/tabs_projects.sim
+include demo/lib/pbhost.sim
+tap 233 233
+expect view HOME
+echo --- hold: five tabs, so the carousel
+tap 233 233 800
+expect view TABS
+shot out/renders/project_tabs_chats.png
+echo --- swipe through the tabs: the puck asks for each page it passes; the Mac answers each (Puck Bridge selectTab)
+mark
+swipe 330 233 150 233 700
+time +600
+expect out {"t":"swarm.select","swarmId":"code-a1"}
+expect out {"t":"swarm.select","swarmId":"code-b2"}
+in {"t":"swarms","selected":"code-a1","items":[{"id":"chats","name":"Chats","agents":3,"panes":3},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3},{"id":"code-b2","name":"openharness","agents":1,"panes":1},{"id":"code-c3","name":"website","agents":2,"panes":2},{"id":"code-d4","name":"finishes-app","agents":0,"panes":0}],"tiles":[]}
+in {"t":"swarms","selected":"code-b2","items":[{"id":"chats","name":"Chats","agents":3,"panes":3},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3},{"id":"code-b2","name":"openharness","agents":1,"panes":1},{"id":"code-c3","name":"website","agents":2,"panes":2},{"id":"code-d4","name":"finishes-app","agents":0,"panes":0}],"tiles":[]}
+time +100
+expect out {"t":"agents.refresh"}
+in {"t":"agents.begin"}
+in {"t":"agent","id":"cc-4","name":"Write the release notes","project":"openharness","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":1,"tab":"code-b2"}
+in {"t":"focus","agentId":"cc-4","keepClock":true}
+time +300
+expect view TABS
+state
+shot out/renders/project_tabs_openharness.png
+echo --- tap the Done mark (or the page) to land on the project
+tap 233 410 120
+time +300
+expect view HOME
+state
+shot out/renders/project_tabs_landed.png

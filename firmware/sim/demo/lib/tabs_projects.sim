@@ -1,0 +1,9 @@
+# Puck Bridge 0.8.3's tabs: Chats, then one per Claude Code project (ids code-<hash>), Chats selected, and its list.
+in {"t":"swarms","selected":"chats","items":[{"id":"chats","name":"Chats","agents":3,"panes":3},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3},{"id":"code-b2","name":"openharness","agents":1,"panes":1},{"id":"code-c3","name":"website","agents":2,"panes":2},{"id":"code-d4","name":"finishes-app","agents":0,"panes":0}],"tiles":[]}
+in {"t":"agents.begin"}
+in {"t":"agent","id":"c1","name":"Trip planning","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c2","name":"Swift refactor","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c3","name":"Grocery list","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":3,"tab":"chats"}
+in {"t":"notif.replace","items":[]}
+in {"t":"focus","agentId":"c1","keepClock":true}

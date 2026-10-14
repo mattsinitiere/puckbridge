@@ -13,8 +13,24 @@ every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.4` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 3`
-  (pb.1 sent 1, pb.2 and pb.3 sent 2).
+- **Version** `0.0.88-pb.6` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 5`
+  (pb.1 sent 1, pb.2 and pb.3 sent 2, pb.4 sent 3, pb.5 sent 4).
+- **pb.6:** with any of the new list styles, **clock-home navigation**: from the clock, down = the notifications (up
+  goes back), up = the settings (down at the top goes back), left = the **Claude Code groups** (a page of the host's
+  `code*` tabs; browsing switches nothing), left again = the chats; a tapped group (or the chats) is switched to with
+  the tab handshake and opens on its **list** (not the face); a tapped row opens its face; right goes back everywhere
+  (face → list → groups → clock). Every list scrolls up and down (the dial too). Agents may carry `status` (≤ 23
+  bytes, e.g. "PR #9 merged") and `tone` (`merged` purple, `open` green, `closed` red, `draft`/`idle` grey), shown on
+  rows that aren't working or unread. **Settings as cards** (name left, value right with "›", On/Off rows as
+  switches; "Swipe down to close"). **Light theme** (`pb.ui {theme:"light"}`): every colour goes through `ht_rgb`,
+  which flips greys and darkens colours for a white ground (the pets keep theirs). Up to **12** settings rows. The
+  boot wordmark says "Puck Bridge". Classic keeps pb.4's side pages and pages.
+- **pb.5:** list styles for the panes list and the tabs (`pb.ui`, below): **cards** (a column of cards, scrolled up
+  and down, the middle one large with a green rim), **dial** (the clock's ring with a segment per row, the chosen one
+  long, its name large in the middle; turned sideways), **compact** (five rows under a fixed green band, scrolled up
+  and down) or **classic** (the official pages). Every row says what it's doing (orange "Working · 1:23", white "Reply
+  ready", "Idle"; a tab: "3 sessions · 1 working"). In the new styles browsing switches nothing: a tap on a row opens
+  it, a tap on a tab switches to it (the two-tab cards are classic-only). Tabs may carry `working`.
 - **pb.4:** timers (below), sound previews in pickers, a tab switch screen of cards (one per tab: name, how many
   chats or sessions, "· N working"; tap to switch, tap the current card or swipe sideways to go back), Code panes show
   their project small under the name, tips that match side pages ("Tap to talk", "Hold for tabs", "Swipe up for all
@@ -119,6 +135,36 @@ From pb 3, host → puck also:
 shows "Timer 4:59" in orange in place of the weather; at zero the TIMER screen ("Time's up", the label, 0:00, the
 ring blinking, a Stop pill) wakes the panel and plays the current sound every 2 s (silent when `muted`, never while
 the microphone is open) for up to 60 s.
+
+From pb 6 (firmware pb.7), host → puck also:
+```
+{"t":"turn.started","agentId":"c1","text":"Working…","elapsed":1080}
+{"t":"pb.timerset","seconds":8100}
+{"t":"pb.alarm","id":"a1","in":3600,"label":"Stand-up"}
+```
+`elapsed` (0–604800 s): how long the turn has already run; the face's "Working" counts from then (ignored within 2 s
+of what the puck shows, so the 10-second re-sends don't make it jump). `pb.timerset` opens the **timer dial** set to
+`seconds` (0: as it was left): three columns (hours, minutes, seconds) with + and − (a drag up or down a column turns
+it too), Start, and with a timer running its time left and Stop. A tap on the clock's weather/timer line opens it too.
+`pb.alarm`: up to four alarms, by `id` (≤ 7 bytes), `in` seconds from now (0 clears it), `label` ≤ 23 bytes. A fifth
+replaces the soonest. Held in RAM (an unplug clears them). One that comes due rings the TIMER screen with "ALARM",
+"Alarm", its label and the time (`ambient`'s `time`); a touch or the small button stops it. Puck → host:
+`{"t":"pb.alarm.state","id":"a1","in":S,"label":"…"}` when one is set, cleared (0), rings (0), and for every alarm
+held after each `pb.sound` (so after every welcome). An alarm's end sends no `pb.timer.done`.
+
+With a nav list style (cards, dial, compact) a still finger on the face for 450 ms starts voice and its release sends
+(**hold to talk**); a release within 900 ms of the touch leaves the microphone open for a tap to send. A tap on the
+clock opens the face of the current chat, or the chats list when the tab is empty.
+
+From pb 4 (firmware pb.5), host → puck also:
+```
+{"t":"pb.ui","lists":"cards"}
+```
+`lists` is `cards`, `dial`, `compact` or `classic` (anything else is classic, and so is a puck that never got one).
+From pb 5 (firmware pb.6) `pb.ui` may also carry `"theme":"dark"|"light"` (absent: unchanged; the puck starts dark).
+In RAM: send it after every `welcome`. `swarms` items may carry `"working":N` (the tab's working chats); a tab that
+isn't on the face shows it. New counts with the same ids and names don't disturb a swipe, so the host re-sends
+`swarms` when they change.
 
 `focus` may carry `"keepClock": true`; `agent` may carry `"project"` (≤ 39 bytes, shown small on Code panes).
 Picker choices may carry `"sound":"chime|soft|bell|digital"` and/or `"volume":0-100`: when the picker rests on one
