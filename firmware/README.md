@@ -13,8 +13,14 @@ every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.4` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 3`
-  (pb.1 sent 1, pb.2 and pb.3 sent 2).
+- **Version** `0.0.88-pb.5` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 4`
+  (pb.1 sent 1, pb.2 and pb.3 sent 2, pb.4 sent 3).
+- **pb.5:** list styles for the panes list and the tabs (`pb.ui`, below): **cards** (a column of cards, scrolled up
+  and down, the middle one large with a green rim), **dial** (the clock's ring with a segment per row, the chosen one
+  long, its name large in the middle; turned sideways), **compact** (five rows under a fixed green band, scrolled up
+  and down) or **classic** (the official pages). Every row says what it's doing (orange "Working · 1:23", white "Reply
+  ready", "Idle"; a tab: "3 sessions · 1 working"). In the new styles browsing switches nothing: a tap on a row opens
+  it, a tap on a tab switches to it (the two-tab cards are classic-only). Tabs may carry `working`.
 - **pb.4:** timers (below), sound previews in pickers, a tab switch screen of cards (one per tab: name, how many
   chats or sessions, "· N working"; tap to switch, tap the current card or swipe sideways to go back), Code panes show
   their project small under the name, tips that match side pages ("Tap to talk", "Hold for tabs", "Swipe up for all
@@ -119,6 +125,15 @@ From pb 3, host → puck also:
 shows "Timer 4:59" in orange in place of the weather; at zero the TIMER screen ("Time's up", the label, 0:00, the
 ring blinking, a Stop pill) wakes the panel and plays the current sound every 2 s (silent when `muted`, never while
 the microphone is open) for up to 60 s.
+
+From pb 4 (firmware pb.5), host → puck also:
+```
+{"t":"pb.ui","lists":"cards"}
+```
+`lists` is `cards`, `dial`, `compact` or `classic` (anything else is classic, and so is a puck that never got one).
+In RAM: send it after every `welcome`. `swarms` items may carry `"working":N` (the tab's working chats); a tab that
+isn't on the face shows it. New counts with the same ids and names don't disturb a swipe, so the host re-sends
+`swarms` when they change.
 
 `focus` may carry `"keepClock": true`; `agent` may carry `"project"` (≤ 39 bytes, shown small on Code panes).
 Picker choices may carry `"sound":"chime|soft|bell|digital"` and/or `"volume":0-100`: when the picker rests on one

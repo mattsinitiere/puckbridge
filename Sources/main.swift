@@ -54,6 +54,8 @@ enum Pref {
     static var weatherOn: Bool { get { bool("weatherOn", true) } set { d.set(newValue, forKey: "weatherOn") } }
     /// Finish sound on Puck Bridge firmware (one of SOUND_STYLES) and its volume.
     static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
+    /// How the puck draws its chat and tab lists (Puck Bridge firmware pb.5): "cards", "dial", "compact" or "classic".
+    static var listStyle: String { get { d.string(forKey: "listStyle") ?? "cards" } set { d.set(newValue, forKey: "listStyle") } }
     static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
     /// The last timer length started on the puck, in minutes.
     static var timerLast: Int { get { d.object(forKey: "timerLast") as? Int ?? 5 } set { d.set(newValue, forKey: "timerLast") } }
@@ -538,6 +540,9 @@ let BUILTIN_CHARACTERS: [PuckCharacter] = [
 /// Finish sounds Puck Bridge firmware can play (firmware/README.md).
 let SOUND_STYLES: [(id: String, name: String)] = [("chime", "Chime"), ("soft", "Soft"), ("bell", "Bell"), ("digital", "Digital")]
 func soundName(_ id: String) -> String { SOUND_STYLES.first { $0.id == id }?.name ?? "Chime" }
+/// The puck's list styles (`pb.ui {lists}`, Puck Bridge firmware pb.5); "classic" is the official firmware's green pages.
+let LIST_STYLES: [(id: String, name: String)] = [("cards", "Cards"), ("dial", "Dial"), ("compact", "Compact list"), ("classic", "Classic")]
+func listStyleName(_ id: String) -> String { LIST_STYLES.first { $0.id == id }?.name ?? "Cards" }
 
 let CUSTOM_ID = "custom"   // the old single "your own" slot; migrated into the library
 let LIB_PREFIX = "lib:"
@@ -1716,12 +1721,18 @@ final class Bridge {
     /// a new list cancels whatever the user is doing on the puck's tab screen.
     func pushTabs(force: Bool = false) {
         let sel = currentTab.id
-        let key = sel + "#" + tabs.map { "\($0.id)=\($0.name)" }.joined(separator: "|")
+        // Firmware pb.5 shows each tab's working chats; it takes a new count without disturbing a swipe (only new ids
+        // or names do), so the counts are part of the key there.
+        let counts = pbFirmware >= 4
+        func working(_ t: PuckTab) -> Int { t.items.filter { busy[$0.id] != nil }.count }
+        let key = sel + "#" + tabs.map { "\($0.id)=\($0.name)" + (counts ? "=\(working($0))" : "") }.joined(separator: "|")
         if !force && key == pushedTabsKey { return }
         pushedTabsKey = key
         send(["t": "swarms", "selected": sel, "tiles": [Any](),
               "items": tabs.map { t -> [String: Any] in
-                  ["id": t.id, "name": fit(t.name), "agents": t.items.count, "panes": t.items.count]
+                  var m: [String: Any] = ["id": t.id, "name": fit(t.name), "agents": t.items.count, "panes": t.items.count]
+                  if counts { m["working"] = working(t) }
+                  return m
               }])
     }
 
@@ -1885,6 +1896,7 @@ final class Bridge {
                 send(["t": "notif.replace", "items": [Any]()])
                 nextAmbient = .distantPast
                 sendSound()
+                sendLists()
             } else {
                 pushChats()   // only if a tile's value changed
             }
@@ -2082,6 +2094,13 @@ final class Bridge {
         rows += [clock,
                  MenuRow(id: "clock24", label: "24-hour clock", value: Pref.clock24 ? "On" : "Off"),
                  MenuRow(id: "weather", label: "Weather", value: Pref.weatherOn ? "On" : "Off")]
+        if pbFirmware >= 4 {
+            // The tenth and last row the firmware takes (UI_PB_MENU_MAX); about 25 of the 512 tokens.
+            var lists = MenuRow(id: "lists", label: "Lists", value: listStyleName(Pref.listStyle))
+            lists.choices = LIST_STYLES.map { MenuChoice($0.name) }
+            lists.index = LIST_STYLES.firstIndex { $0.id == Pref.listStyle } ?? 0
+            rows.append(lists)
+        }
         return rows
     }
 
@@ -2147,6 +2166,9 @@ final class Bridge {
         case "clock":
             guard Bridge.clockSteps.indices.contains(index) else { break }
             Pref.idleMin = Bridge.clockSteps[index]; nextAmbient = .distantPast
+        case "lists":
+            guard LIST_STYLES.indices.contains(index) else { break }
+            Pref.listStyle = LIST_STYLES[index].id; sendLists()
         default:
             break
         }
@@ -2178,6 +2200,13 @@ final class Bridge {
     func sendSound(test: Bool = false) {
         guard greeted, pbFirmware >= 1 else { return }
         send(["t": "pb.sound", "style": Pref.soundStyle, "volume": Pref.soundVolume, "test": test])
+    }
+
+    /// The puck's list style (firmware pb.5, hello "pb" 4). It keeps it in RAM, so it's sent after every welcome.
+    func sendLists() {
+        guard greeted, pbFirmware >= 4 else { return }
+        send(["t": "pb.ui", "lists": Pref.listStyle])
+        say("Puck lists → \(listStyleName(Pref.listStyle))")
     }
 
     func menuTap(_ id: String) {
@@ -3269,6 +3298,12 @@ final class AppModel: ObservableObject {
     }
     func setWeather(_ on: Bool) { Pref.weatherOn = on; weather.refresh(); weatherChanged() }
 
+    func setListStyle(_ id: String) {
+        Pref.listStyle = id
+        objectWillChange.send()
+        bridge.perform { $0.sendLists(); $0.sendMenu() }
+    }
+
     func setSound(style: String? = nil, volume: Int? = nil, test: Bool = true) {
         if let s = style { Pref.soundStyle = s }
         if let v = volume { Pref.soundVolume = v }
@@ -3780,6 +3815,14 @@ struct PuckPane: View {
                     Toggle("Calm mode (the character doesn't react to taps or finished replies)",
                            isOn: Binding(get: { s.quiet }, set: { model.setPuck("quiet", $0) }))
                     Toggle("Reverse scrolling", isOn: Binding(get: { s.scrollReversed }, set: { model.setPuck("scrollReversed", $0) }))
+                    Picker("Chat and tab lists", selection: Binding(get: { Pref.listStyle }, set: { model.setListStyle($0) })) {
+                        ForEach(LIST_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
+                    }
+                    .disabled(model.snap.pbFirmware < 4)
+                    Text(model.snap.pbFirmware >= 4
+                         ? "Cards: a column of cards. Dial: the clock's ring, one item at a time. Compact list: five rows at once. Classic: the original green pages. Also on the puck: Settings → Lists."
+                         : "Needs Puck Bridge firmware 0.0.88-pb.5 or newer (Firmware, below).")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Sound") {
                     Toggle("Play a sound when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))

@@ -1,0 +1,68 @@
+# Puck Bridge firmware pb.5: the "dial" list style (pb.ui) on the panes list and the tabs. Browsing switches
+# nothing; a tap on a row opens that pane, a tap on a tab switches to it with the usual handshake.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"dial"}
+in {"t":"summary","agentId":"c3","name":"Grocery list","engine":"claude","machine":"Mac Studio","recap":"Added oat milk.","text":"Added oat milk."}
+time +300
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+time +20000
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+time +14000
+echo --- the face, then a swipe up: the panes list in the dial style
+boot tap
+tap 233 233
+time +300
+swipe 233 330 233 120 200
+time +300
+expect view AGENTS
+shot out/renders/lists_dial_chats.png
+echo --- browsing moves the list and opens nothing
+mark
+swipe 300 233 190 233 500
+time +700
+expect view AGENTS
+expect noout {"t":"focus"
+shot out/renders/lists_dial_chats_moved.png
+echo --- a tap on the chosen row opens it (its face)
+mark
+tap 233 233 120
+time +300
+expect view AGENT
+expect out {"t":"focus"
+echo --- hold for the tabs: five, in the dial style
+tap 233 233 800
+time +300
+expect view TABS
+shot out/renders/lists_dial_tabs.png
+echo --- browsing the tabs switches nothing
+mark
+swipe 300 233 190 233 500
+time +700
+swipe 300 233 190 233 500
+time +700
+expect view TABS
+expect noout swarm.select
+shot out/renders/lists_dial_tabs_moved.png
+echo --- a tap on the chosen tab switches to it
+mark
+tap 233 233 120
+time +200
+expect out {"t":"swarm.select","swarmId":"code-b2"}
+include demo/lib/lists_swarms_b2.sim
+time +100
+expect out {"t":"agents.refresh"}
+in {"t":"agents.begin"}
+in {"t":"agent","id":"cc-4","name":"Write the release notes","project":"openharness","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":1,"tab":"code-b2"}
+in {"t":"focus","agentId":"cc-4","keepClock":true}
+time +400
+expect view HOME
+echo --- classic again: the official pages come back
+in {"t":"pb.ui","lists":"classic"}
+tap 233 233 800
+time +300
+expect view TABS
