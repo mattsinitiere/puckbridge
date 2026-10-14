@@ -136,6 +136,24 @@ shows "Timer 4:59" in orange in place of the weather; at zero the TIMER screen (
 ring blinking, a Stop pill) wakes the panel and plays the current sound every 2 s (silent when `muted`, never while
 the microphone is open) for up to 60 s.
 
+From pb 7 (firmware pb.8), host → puck also:
+```
+{"t":"ambient", …, "secs":56640, "h24":false}
+{"t":"pb.status","text":"Allow Accessibility on your Mac"}
+{"t":"pb.ui","hints":true}
+```
+`secs` (seconds since local midnight) and `h24` let the clock keep time on its own: without the Mac (asleep, cable
+out) the clock stays up, dimmed, with "Waiting for your Mac" (the date until midnight); every Mac screen goes back to
+it. `pb.status`: what keeps the Mac from working, on the clock's line in amber until `""`. `pb.ui hints`: the
+clock's swipe hints (ring notches and "Notifications", "Settings", "Code") for 4 s the first 12 times it appears
+(default on). A non-silent `summary` while the clock is up (nav styles) is a 12 s line on the clock ("Grocery list is
+ready"; a tap there opens it) instead of the face. A `swarms` item with id `now` leads the Claude Code groups. Timers
+and alarms ring through the preview path, so `muted` (the finish chime) no longer silences them. Puck → host:
+`{"t":"pb.alarm.done","id","label","reason":"stopped"|"snoozed"|"timeout"}` (a tap anywhere but Stop snoozes an alarm
+9 min; its new `pb.alarm.state` follows). Timer dial: preset chips, a running timer as a draining ring with "+1 min"
+and Stop, "<" back. Hold to talk fills a ring (PB_PTT_MS to PB_PTT_TAP_MS), "Keep holding" then "Release to send",
+and a slide of 90 px cancels. STOP's pill says "Claude already finished" when it is; "Stopping" until `turn.done`.
+
 From pb 6 (firmware pb.7), host → puck also:
 ```
 {"t":"turn.started","agentId":"c1","text":"Working…","elapsed":1080}

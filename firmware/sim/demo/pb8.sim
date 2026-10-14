@@ -1,0 +1,106 @@
+# Puck Bridge firmware pb.8 (UX review, owner 2026-10-14 "fix all of that"): the clock teaches its swipes, a finished
+# chat is a banner on the clock (it no longer takes the clock away), a right swipe on the clock stays home, the clock
+# keeps time without the Mac, hold to talk fills a ring and slides away to cancel, Stop says when it is too late and
+# "Stopping" after, the working face says how to stop, and "now" (what needs you) leads the Claude Code groups.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+in {"t":"swarms","selected":"chats","items":[{"id":"chats","name":"Chats","agents":5,"panes":5,"working":1},{"id":"now","name":"Needs you","agents":2,"panes":2,"working":1},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3,"working":1},{"id":"code-b2","name":"openharness","agents":1,"panes":1,"working":0}],"tiles":[]}
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+time +300
+boot tap
+time +500
+expect view CLOCK
+shot out/renders/pb8_clock_hints.png
+time +4000
+shot out/renders/pb8_clock.png
+echo --- the Mac's word on what is wrong, on the clock's line (pb.status), and cleared
+in {"t":"pb.status","text":"Allow Accessibility on your Mac"}
+time +200
+shot out/renders/pb8_clock_status.png
+in {"t":"pb.status","text":""}
+echo --- a right swipe on the clock stays home
+swipe 120 233 330 233 250
+time +200
+expect view CLOCK
+echo --- a finished chat: a banner on the clock, the clock stays; a tap there opens the chat
+in {"t":"turn.started","agentId":"c3","text":"Writing…"}
+in {"t":"summary","agentId":"c3","name":"Grocery list","engine":"claude","machine":"Mac Studio","recap":"Added oat milk.","text":"Added oat milk."}
+time +300
+expect view CLOCK
+shot out/renders/pb8_clock_banner.png
+mark
+tap 233 262 120
+time +300
+expect view AGENT
+expect out {"t":"focus","agentId":"c3"
+echo --- left: "Needs you" leads the groups
+boot tap
+time +300
+swipe 330 233 120 233 250
+time +300
+expect view GROUPS
+shot out/renders/pb8_groups_now.png
+echo --- the working face says how to stop it
+boot tap
+in {"t":"turn.started","agentId":"c3","text":"Writing…","elapsed":95}
+tap 233 200 100
+time +500
+expect view HOME
+shot out/renders/pb8_face_stop_tip.png
+echo --- hold to talk: the ring fills, then "Release to send"
+touch down 233 233
+time +600
+expect view VOICE
+shot out/renders/pb8_voice_hold.png
+time +500
+shot out/renders/pb8_voice_release.png
+echo --- slid away: cancelled, nothing sent
+mark
+touch move 233 300
+touch move 233 380
+time +100
+expect noout voice.end
+touch up 233 380
+time +300
+expect view HOME
+echo --- tap to talk: "Tap to send" and the chat's name
+time +1500
+tap 233 233 80
+time +600
+expect view VOICE
+shot out/renders/pb8_voice_tap.png
+tap 233 233 80
+time +70000
+boot tap
+echo --- Stop after it finished: said so
+in {"t":"turn.started","agentId":"c3","text":"Writing…"}
+tap 233 200 100
+time +300
+boot hold
+expect view STOP
+in {"t":"turn.done","agentId":"c3"}
+tap 316 334 100
+time +200
+expect view MESSAGE
+shot out/renders/pb8_stop_finished.png
+tap 233 233 80
+echo --- Stop while it works: "Stopping" until the turn ends
+in {"t":"turn.started","agentId":"c3","text":"Writing…"}
+boot hold
+expect view STOP
+mark
+tap 316 334 100
+time +200
+expect out {"t":"turn.stop"
+expect view AGENT
+shot out/renders/pb8_face_stopping.png
+echo --- the Mac goes: the clock stays and keeps time, "Waiting for your Mac"
+boot tap
+time +300
+include demo/lib/drop.sim
+time +60000
+expect view CLOCK
+shot out/renders/pb8_clock_offline.png

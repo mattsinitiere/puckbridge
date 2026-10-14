@@ -24,6 +24,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import CoreLocation
 import CryptoKit
+import UserNotifications
 
 // ============================================================================================
 // MARK: Settings + log
@@ -70,6 +71,12 @@ enum Pref {
     static var codeFiles: Bool { get { bool("codeFiles", true) } set { d.set(newValue, forKey: "codeFiles") } }
     /// Keep the character library in iCloud Drive too, so every Mac signed in to it has the same characters.
     static var syncCharacters: Bool { get { bool("syncCharacters", true) } set { d.set(newValue, forKey: "syncCharacters") } }
+    /// Show where the clock's swipes go, the first few times it comes up after the puck starts (firmware pb.8).
+    static var clockHints: Bool { get { bool("clockHints", true) } set { d.set(newValue, forKey: "clockHints") } }
+    /// This puck has run Puck Bridge firmware: a hello without it later means something put the stock firmware back.
+    static var pbInstalled: Bool { get { bool("pbInstalled", false) } set { d.set(newValue, forKey: "pbInstalled") } }
+    /// Post a Mac notification when Claude finishes (or an alarm is due) and the puck isn't connected.
+    static var macNotify: Bool { get { bool("macNotify", true) } set { d.set(newValue, forKey: "macNotify") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -97,11 +104,19 @@ func launchctl(_ args: [String]) {
     p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
     try? p.run(); p.waitUntilExit()
 }
-func stopOpenHarness() { launchctl(["bootout", "gui/\(getuid())/\(HARNESSD)"]) }
+let HARNESSD_PLIST = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/LaunchAgents/\(HARNESSD).plist").path
+/// OpenHarness is installed (its launch agent is): only then does Settings show its section.
+var openHarnessInstalled: Bool { FileManager.default.fileExists(atPath: HARNESSD_PLIST) }
+/// Stop OpenHarness's service, and keep it from starting at the next login too (0.8.4: `bootout` alone lasted until
+/// the next login, when launchd started it again and it could put the stock firmware back on the puck).
+func stopOpenHarness() {
+    launchctl(["bootout", "gui/\(getuid())/\(HARNESSD)"])
+    launchctl(["disable", "gui/\(getuid())/\(HARNESSD)"])
+}
 func startOpenHarness() {
-    let plist = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/LaunchAgents/\(HARNESSD).plist").path
-    launchctl(["bootstrap", "gui/\(getuid())", plist])
+    launchctl(["enable", "gui/\(getuid())/\(HARNESSD)"])
+    launchctl(["bootstrap", "gui/\(getuid())", HARNESSD_PLIST])
 }
 
 /// The certificate this app is signed with ("Puck Bridge Signing"), or nil when ad-hoc signed. macOS remembers
@@ -300,6 +315,9 @@ final class Claude {
         if running?.processIdentifier != r.processIdentifier {
             running = r
             let a = AXUIElementCreateApplication(r.processIdentifier)
+            // A busy or hung Claude must not stall the bridge thread (it also answers the puck): 1.5 s per AX call,
+            // not the 6 s default (0.8.4; review: the puck said "No answer from the Mac" during long runs).
+            AXUIElementSetMessagingTimeout(a, 1.5)
             AXUIElementSetAttributeValue(a, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             app = a
             say("Claude Desktop found (pid \(r.processIdentifier))")
@@ -483,12 +501,30 @@ struct CodeFileSession {
     let modified: Date
     let lastPrompt: Date?   // the last thing the person asked: when the running turn began
     let working: Bool
+    var tool = ""           // what it's doing, in words ("Running a command"), while working on a tool
+    var reply = ""          // the last reply's text (for the finish card; only shown if "Show the start of the reply")
+}
+
+/// A Claude Code tool's name, as the puck says it ("Editing files"); "" for one it doesn't know.
+func toolWords(_ name: String) -> String {
+    switch name {
+    case "Bash", "BashOutput": return "Running a command"
+    case "Edit", "MultiEdit", "Write", "NotebookEdit": return "Editing files"
+    case "Read", "Grep", "Glob", "LS": return "Reading files"
+    case "WebFetch", "WebSearch": return "Searching the web"
+    case "Task", "Agent": return "Running an agent"
+    case "TodoWrite": return "Planning"
+    default: return name.hasPrefix("mcp__") ? "Using a connector" : ""
+    }
 }
 
 final class CodeFiles {
     let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+    /// What the transcript's last word was: a prompt or a tool's result (Claude's turn), a tool call (running it), or
+    /// a reply with nothing pending (its turn is over).
+    private enum Last { case prompt, tool(String), reply, other }
     private struct Parsed { let mtime: Date; let size: Int; let cwd: String; let summary: String; let firstPrompt: String
-                            let lastPrompt: Date?; let ended: Bool }
+                            let lastPrompt: Date?; let last: Last; let reply: String }
     private var parsed: [String: Parsed] = [:]          // by file path, while its date and size hold
     private var projectOf: [String: String] = [:]       // cwd → its repository's folder name
     private var desktopTitles: [String: String] = [:]   // session id → Claude Desktop's title for it
@@ -520,9 +556,22 @@ final class CodeFiles {
                 let id = f.deletingPathExtension().lastPathComponent
                 let title = desktopTitles[id] ?? (p.summary.isEmpty ? p.firstPrompt : p.summary)
                 guard !title.isEmpty else { continue }
-                // Working: written to in the last 45 s, and the last word isn't a finished reply.
+                /*
+                 * WORKING (0.8.4, review: the old "written in the last 45 s" called a 3-minute build finished): Claude's
+                 * turn while the last word is a prompt, a tool's result or a tool call (a long build, a test run, a
+                 * permission prompt), for up to 30 minutes of silence; and for 8 s after a reply, which another step
+                 * can follow. Over when the last word is a reply nothing follows.
+                 */
+                let age = now.timeIntervalSince(mtime)
+                var working = false, tool = ""
+                switch p.last {
+                case .prompt: working = age < 30 * 60
+                case .tool(let name): working = age < 30 * 60; tool = toolWords(name)
+                case .reply: working = age < 8
+                case .other: working = false
+                }
                 out.append(CodeFileSession(id: id, project: project, title: title, modified: mtime, lastPrompt: p.lastPrompt,
-                                           working: now.timeIntervalSince(mtime) < 45 && !p.ended))
+                                           working: working, tool: tool, reply: p.reply))
             }
         }
         out.sort { $0.modified > $1.modified }
@@ -594,12 +643,23 @@ final class CodeFiles {
         let first = top.lazy.compactMap(CodeFiles.prompt).first ?? ""
         let firstLine = first.split(separator: "\n").first.map(String.init) ?? ""
         let lastPrompt = end.last(where: { CodeFiles.prompt($0) != nil }).flatMap { CodeFiles.date($0["timestamp"]) }
-        // Finished: the last message is Claude's, with no tool call waiting on a result.
-        let last = end.last(where: { ["user", "assistant"].contains($0["type"] as? String ?? "") })
-        let content = (last?["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
-        let ended = last?["type"] as? String == "assistant" && !content.contains(where: { $0["type"] as? String == "tool_use" })
+        // The last word, from the last user or assistant message that isn't a side agent's.
+        let lastRec = end.last(where: { ["user", "assistant"].contains($0["type"] as? String ?? "") && $0["isSidechain"] as? Bool != true })
+        let content = (lastRec?["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+        var last = Last.other
+        if lastRec?["type"] as? String == "user" { last = .prompt }   // a prompt or a tool's result: Claude's turn
+        else if lastRec?["type"] as? String == "assistant" {
+            if let use = content.last(where: { $0["type"] as? String == "tool_use" }) { last = .tool(use["name"] as? String ?? "") }
+            else { last = .reply }
+        }
+        let reply: String = {
+            guard case .reply = last else { return "" }
+            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+                .joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        }()
         let p = Parsed(mtime: mtime, size: size, cwd: cwd, summary: String(summary.prefix(80)),
-                       firstPrompt: String(firstLine.prefix(60)), lastPrompt: lastPrompt, ended: ended)
+                       firstPrompt: String(firstLine.prefix(60)), lastPrompt: lastPrompt, last: last,
+                       reply: String(reply.prefix(1500)))
         parsed[f.path] = p
         return p
     }
@@ -663,7 +723,8 @@ final class Transcriber {
         }
     }
 
-    func transcribe(pcm: [UInt8], rate: Double, lang: String, done: @escaping (Result<String, Error>) -> Void) {
+    func transcribe(pcm: [UInt8], rate: Double, lang: String, hints: [String] = [],
+                    done: @escaping (Result<String, Error>) -> Void) {
         let frames = pcm.count / 2
         guard frames > Int(rate * 0.3) else { done(.failure(SimpleError("Didn't catch that"))); return }
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: lang)) ?? SFSpeechRecognizer(), rec.isAvailable else {
@@ -674,6 +735,9 @@ final class Transcriber {
         let req = SFSpeechAudioBufferRecognitionRequest()
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         req.shouldReportPartialResults = false
+        // The names said to the puck (chat titles, project names) are words the recogniser doesn't know (0.8.4).
+        req.contextualStrings = Array(hints.prefix(100))
+        req.addsPunctuation = true
         guard let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
               let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(frames)),
               let ch = buf.floatChannelData?[0] else {
@@ -718,6 +782,7 @@ enum VoiceCommand: Equatable {
     case stopTimer
     case alarm(Date, String)
     case clearAlarms
+    case stopClaude           // "stop Claude", "stop writing", "cancel that" (0.8.4)
 
     private static let words: [String: Int] = [
         "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
@@ -787,6 +852,13 @@ enum VoiceCommand: Equatable {
         while let l = t.last, ["please", "thanks", "now"].contains(l) { t.removeLast() }
         guard !t.isEmpty, t.count <= 16 else { return nil }
         let set = Set(t)
+        // "stop Claude", "stop writing", "stop that", "cancel that", "stop": the turn on the puck's chat stops.
+        let stopWords: Set<String> = ["stop", "cancel", "halt"], stopRest: Set<String> = ["claude", "writing", "that", "it",
+                                                                                         "now", "the", "reply", "turn"]
+        if let f = t.first, stopWords.contains(f), Set(t.dropFirst()).isSubset(of: stopRest),
+           t.count == 1 || !Set(t.dropFirst()).isDisjoint(with: ["claude", "writing", "that", "it", "reply", "turn"]) {
+            return .stopClaude
+        }
         let verbs: Set<String> = ["stop", "cancel", "clear", "end", "kill", "turn", "delete", "remove"]
         // stop the timer / cancel my alarms
         if !set.isDisjoint(with: verbs) {
@@ -1785,6 +1857,9 @@ struct Snapshot {
     var fwBusy = false
     var timerEnd: Date?
     var alarms: [PuckAlarm] = []
+    var health = ""             // what keeps Puck Bridge from working; "" = all well
+    var fwProgress: Double?     // a firmware install's progress, 0...1
+    var stockFirmware = false   // Puck Bridge firmware was replaced (OpenHarness?)
 }
 
 /// An alarm held by the puck (firmware pb.7): it counts down in the puck's RAM, so unplugging clears it.
@@ -1818,6 +1893,7 @@ struct BusyChat {
     var labels: Set<String>
     var prompt: String
     var awaySince: Date?           // nil = on screen
+    var activity = ""              // what it's doing in words, from its transcript ("Running a command"); "" = Writing…
 }
 
 final class PetTransfer {
@@ -1883,6 +1959,37 @@ final class Bridge {
     var seenOnce = false
     var emptyReads = 0
     var claudeReadOnce = false
+    var blindSince: Date?              // Claude runs, but nothing of its window can be read (no sidebar, box or mode)
+    var health = ""                    // what keeps Puck Bridge from working, in words; "" = all well
+    var healthSent: String?            // what the puck was last told (pb.status)
+    var nextHealth = Date.distantPast
+
+    /// HONEST HEALTH (0.8.4; review: "silent blindness" — lost permission, Claude closed or its window unreadable left
+    /// the puck looking normal). Said in Settings, on the puck's clock (pb.status, firmware pb.8), and as a message on
+    /// the puck for a lost permission on older firmware.
+    func checkHealth(now: Date) {
+        guard now >= nextHealth else { return }
+        nextHealth = now.addingTimeInterval(3)
+        var h = ""
+        if !axTrusted { h = "Allow Accessibility on your Mac" }
+        else if claude.app == nil { h = "Claude isn't open on your Mac" }
+        else if let b = blindSince, now.timeIntervalSince(b) > 30 { h = "Open Claude's window on your Mac" }
+        if h != health { health = h; say(h.isEmpty ? "Health: all well" : "Health: \(h)"); publish() }
+        guard greeted, healthSent != h else { return }
+        healthSent = h
+        if pbFirmware >= 7 { send(["t": "pb.status", "text": h]) }
+        else if !h.isEmpty && !axTrusted { toast("Puck Bridge needs Accessibility. Allow it on your Mac.") }
+    }
+
+    /// The Mac woke: the puck (and the clock's words) may be stale; look again now.
+    func woke() {
+        say("Mac woke: checking the puck and Claude")
+        nextConnect = Date()
+        nextAmbient = .distantPast
+        nextHealth = .distantPast
+        nextCodeFiles = .distantPast
+        if greeted { send(["t": "ping"]) }
+    }
 
     // selection + voice
     var openedFromPuck: String?
@@ -1927,7 +2034,7 @@ final class Bridge {
         var s = Snapshot()
         s.puckConnected = port != nil && greeted
         s.puck = released ? "Puck: lent to OpenHarness"
-               : port == nil ? "Puck: not connected" : greeted ? "Puck: connected (fw \(fw))" : "Puck: connecting…"
+               : port == nil ? "Puck: not found" : greeted ? "Puck: connected" : "Puck: connecting…"
         s.claudeRunning = claude.app != nil
         s.claude = !axTrusted ? "Claude: needs Accessibility permission"
                  : claude.app == nil ? "Claude: not running"
@@ -1938,6 +2045,8 @@ final class Bridge {
         s.fw = fw; s.hw = hw
         s.timerEnd = timerLeft != nil ? timerEnd : nil
         s.alarms = alarms.sorted { $0.at < $1.at }
+        s.health = health
+        s.stockFirmware = stockFirmware
         s.chats = chatRows.map { ChatItem(id: $0.id, title: $0.title) }
         for c in codeRows {
             let p = c.project ?? "Code", item = ChatItem(id: c.id, title: c.title)
@@ -1951,6 +2060,7 @@ final class Bridge {
         s.isPro = board == "pro"
         s.fwNote = fwNote
         s.fwBusy = fwXfer != nil
+        s.fwProgress = fwXfer.map { x in x.image.data.isEmpty ? 1 : Double(x.acked) / Double(x.image.data.count) }
         s.character = Pref.character
         DispatchQueue.main.async { self.onSnapshot?(s) }
     }
@@ -1969,7 +2079,7 @@ final class Bridge {
         if port != nil { say("Puck disconnected (\(why))") }
         port = nil; greeted = false; pushedKey = ""; pushedTabsKey = ""; voice = nil; decoder.reset()
         petXfer = nil; petMapSent = ""; puckSettings = nil; settingsNote = ""
-        alarms = []   // the puck holds them; it reports them again after the next welcome
+        alarmsSeen = []   // 0.8.4: the Mac keeps its alarms; after the next welcome it re-sends those the puck lost
         if fwXfer != nil { fwXfer = nil; fwNote = "The puck disconnected during the install. It keeps its current firmware; try again." }
         pbFirmware = 0
     }
@@ -2019,8 +2129,22 @@ final class Bridge {
         let chats = chatRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
         let settings = Pref.puckTiles && pbFirmware < 1
+        /*
+         * ACTIVE (firmware pb.8 shows it first among the Claude Code groups): every chat and session that is working
+         * or finished and not opened since, across all projects: replies waiting first, then what works, longest first.
+         * Its rows are the real ones, so opening, voice and Stop work as anywhere.
+         */
+        if pbFirmware >= 7 {
+            let rows = allRows
+            let ready = rows.filter { readyIds.contains($0.id) && busy[$0.id] == nil }
+            let working = rows.filter { busy[$0.id] != nil }
+                .sorted { (busy[$0.id]?.since ?? .distantPast) < (busy[$1.id]?.since ?? .distantPast) }
+            var seen = Set<String>()
+            let items = (ready + working).filter { seen.insert($0.id).inserted }.prefix(MAX_ROWS)
+            if !items.isEmpty { out.append(PuckTab(id: "now", name: "Active", items: items.map { PuckItem(id: $0.id, name: $0.title, chat: $0) })) }
+        }
         if Pref.codeTabs {
-            for p in projectOrder.prefix(MAX_TABS - 1 - (settings ? 1 : 0)) {
+            for p in projectOrder.prefix(MAX_TABS - out.count - (settings ? 1 : 0)) {
                 let rows = codeRowsFor(p).prefix(MAX_ROWS)
                 out.append(PuckTab(id: Bridge.codeTabId(p), name: p, items: rows.map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
             }
@@ -2101,25 +2225,33 @@ final class Bridge {
         let key = { (r: [String: [Chat]]) -> String in r.keys.sorted().map { k in k + ":" + r[k]!.map { $0.id + $0.status }.joined(separator: ",") }.joined(separator: "|") }
         let changed = key(rows) != key(fileRows)
         fileRows = rows
-        // A folded project's session starts working here (an unfolded one is watched on screen); any session marked
-        // busy here stops when its file says so.
+        /*
+         * EVERY LOCAL SESSION, folded or not, on screen or not (0.8.4; review: a session you switched away from was
+         * invisible until you came back, then given up after 20 min). Its transcript says when it works, what on, and
+         * when it is done, with the reply. The chat on screen while Claude writes stays the Stop button's (checkClaude),
+         * so the two never both announce one finish.
+         */
         for f in fileSessions {
             guard let row = (codeRowsFor(f.project) + codeRows).first(where: { $0.project == f.project && $0.title == f.title })
             else { continue }
+            let onScreen = row.id == writingChat
             if f.working {
-                if busy[row.id] == nil && !unfoldedProjects.contains(f.project) {
-                    busy[row.id] = BusyChat(since: f.lastPrompt ?? now, textsBefore: [], labels: [], prompt: "", awaySince: now)
+                if busy[row.id] == nil && !onScreen {
+                    busy[row.id] = BusyChat(since: f.lastPrompt ?? now, textsBefore: [], labels: [], prompt: "", awaySince: now,
+                                            activity: f.tool)
                     fileBusy.insert(row.id)
                     say("A Code session in \(f.project) is working (its file)")
                     sendTurnStarted(row.id, "Working…")
                     nextBusyRefresh = min(nextBusyRefresh, now.addingTimeInterval(10))
-                } else if fileBusy.contains(row.id) {
-                    busy[row.id]?.awaySince = now
+                } else if busy[row.id] != nil {
+                    // Known busy (here or from Stop while it was on screen): the file keeps it alive and ends it.
+                    if !onScreen { fileBusy.insert(row.id); busy[row.id]?.awaySince = now }
+                    if busy[row.id]?.activity != f.tool { busy[row.id]?.activity = f.tool; sendTurnStarted(row.id, "Working…") }
                 }
-            } else if fileBusy.contains(row.id) {
+            } else if fileBusy.contains(row.id) && !onScreen {
                 fileBusy.remove(row.id)
                 endBusy(row.id)
-                notify(row, "Claude finished in \(f.project).")
+                if f.reply.isEmpty { notify(row, "Claude finished in \(f.project).", plain: true) } else { notify(row, f.reply) }
             }
         }
         if changed && greeted { pushChats() }
@@ -2198,7 +2330,8 @@ final class Bridge {
     /// turn.started, with how long the turn has run for firmware that takes it (pb.7, hello "pb" 6), so the puck's
     /// "Working" counts from when it began rather than from when the puck heard of it.
     func sendTurnStarted(_ id: String, _ text: String) {
-        var m: [String: Any] = ["t": "turn.started", "agentId": id, "text": text]
+        let words = busy[id].map { $0.activity.isEmpty ? text : $0.activity + "…" } ?? text
+        var m: [String: Any] = ["t": "turn.started", "agentId": id, "text": words]
         if pbFirmware >= 6, let b = busy[id] { m["elapsed"] = max(0, Int(Date().timeIntervalSince(b.since))) }
         send(m)
     }
@@ -2285,9 +2418,29 @@ final class Bridge {
 
     func toast(_ s: String) { send(["t": "toast", "text": s]) }
 
-    func notify(_ chat: Chat?, _ text: String) {
+    /// Press Claude's Stop for this chat (nil: whatever is writing on screen). false: nothing is writing there.
+    @discardableResult
+    func stopTurn(_ id: String?) -> Bool {
+        let v = claude.read()
+        if let stop = v.stopButton, id == nil || id == writingChat || openChatId(v) == id {
+            say("Puck → stop Claude"); claude.press(stop)
+            return true
+        } else if let id = id, busy[id] != nil, allRows.contains(where: { $0.id == id }) {
+            // Writing in a chat that isn't on screen: open it, then press its Stop (see the main loop).
+            openChat(id, why: "stop")
+            pendingStop = (id, Date())
+            return true
+        }
+        return false
+    }
+
+    /// A finish card on the puck (it beeps). `plain`: the text is ours, not Claude's reply, so it shows whatever the
+    /// "Show the start of the reply" setting.
+    func notify(_ chat: Chat?, _ text: String, plain: Bool = false) {
         let title = chat?.title ?? "Claude"
-        let body = !Pref.showReply || text.isEmpty ? "Claude finished replying." : text
+        let body = !plain && (!Pref.showReply || text.isEmpty) ? "Claude finished replying." : text
+        if let id = chat?.id { readyIds.insert(id) }
+        if !greeted { macNotify(title: title, body: body) }
         send(["t": "summary", "agentId": chat?.id ?? "claude", "name": title, "engine": engine,
               "machine": MACHINE_NAME, "recap": String(body.prefix(190)), "text": String(body.prefix(1500))])
         say("Finished: \"\(title)\"")
@@ -2319,6 +2472,15 @@ final class Bridge {
                 focusAfterList = true
                 ambientSent = false
                 say("Puck connected (firmware \(fw)\(petMax >= 1 ? ", custom characters supported" : ""))")
+                rearmAt = Date().addingTimeInterval(4)   // after the puck has told us what it still holds
+                healthSent = nil                          // tell this puck what's wrong, if anything
+                if pbFirmware >= 1 { Pref.pbInstalled = true; stockFirmware = false }
+                else if Pref.pbInstalled && fwExpect.isEmpty {
+                    // Something put the stock firmware back (OpenHarness does when it connects).
+                    stockFirmware = true
+                    say("The puck runs stock firmware again; Puck Bridge firmware was replaced")
+                    toast("Puck Bridge firmware was replaced. Reinstall it on your Mac: Settings, Puck.")
+                }
                 // Read Claude now, so the chat list (and its focus) reach the puck before the first `ambient` puts it on
                 // its clock; and open the tab that matches Claude's view.
                 if !claudeReadOnce && axTrusted && claude.attach() { checkClaude() }
@@ -2362,17 +2524,7 @@ final class Bridge {
             if let id = msg["agentId"] as? String, Tile(id: id) == nil { pendingFocus = (id, Date()) }
             else { pendingFocus = nil }
         case "turn.stop":
-            let id = msg["agentId"] as? String
-            let v = claude.read()
-            if let stop = v.stopButton, id == nil || id == writingChat || openChatId(v) == id {
-                say("Puck → stop Claude"); claude.press(stop)
-            } else if let id = id, busy[id] != nil, allRows.contains(where: { $0.id == id }) {
-                // Writing in a chat that isn't on screen: open it, then press its Stop (see the main loop).
-                openChat(id, why: "stop")
-                pendingStop = (id, Date())
-            } else {
-                toast("Claude isn't writing")
-            }
+            if !stopTurn(msg["agentId"] as? String) { toast("Claude isn't writing") }
         case "voice.begin":
             voice = VoiceTurn(upload: msg["uploadId"] as? String ?? "",
                               agentId: msg["agentId"] as? String,
@@ -2433,11 +2585,25 @@ final class Bridge {
             guard let id = msg["id"] as? String, !id.isEmpty else { break }
             let left = msg["in"] as? Int ?? 0
             alarms.removeAll { $0.id == id }
+            alarmsSeen.insert(id)
             if left > 0 {
                 alarms.append(PuckAlarm(id: id, label: msg["label"] as? String ?? "Alarm", at: Date().addingTimeInterval(Double(left))))
             }
             publish()
+        case "pb.alarm.done":
+            // Firmware pb.8: how an alarm ended. One that rang a minute with nobody there is a notice too.
+            let label = msg["label"] as? String ?? "Alarm"
+            switch msg["reason"] as? String {
+            case "timeout":
+                say("Alarm \(label): rang out, nobody there")
+                notifyPuck(title: "Missed alarm", body: label == "Alarm" ? "Your alarm rang with nobody there." : "\(label): it rang with nobody there.")
+            case "snoozed": say("Alarm \(label): snoozed 9 min")
+            default: say("Alarm \(label): stopped")
+            }
         case "pb.timer.done":
+            if msg["reason"] as? String == "timeout" {
+                notifyPuck(title: "Timer", body: "Your timer finished with nobody there.")
+            }
             timerEnd = nil
             say("Timer: done (\(msg["reason"] as? String ?? "?"))")
             sendMenu()
@@ -2655,6 +2821,70 @@ final class Bridge {
     // ---------- alarms (they count down on the puck, in RAM; firmware pb.7) ----------
     var alarms: [PuckAlarm] = []
     var alarmSeq = 0
+    var alarmsSeen: Set<String> = []   // the ones this connection's puck reported (pb.alarm.state)
+    var rearmAt = Date.distantFuture   // when to re-send what the puck lost (a few seconds after a welcome)
+    var stockFirmware = false          // the puck ran Puck Bridge firmware before and doesn't now
+    var readyIds: Set<String> = []     // finished and not opened since: the "Active" tab's "Reply ready" rows
+    var macDue: Set<String> = []       // alarms already announced on the Mac (the puck was away)
+
+    /// After a welcome: the alarms and the timer the puck lost (unplugged, restarted) go back to it; ones that came
+    /// due while it was away are told on the Mac.
+    func rearm(now: Date) {
+        rearmAt = .distantFuture
+        guard greeted else { return }
+        if pbFirmware >= 6 {
+            for a in alarms where !alarmsSeen.contains(a.id) {
+                let left = Int(a.at.timeIntervalSince(now).rounded())
+                if left > 1 {
+                    send(["t": "pb.alarm", "id": a.id, "in": left, "label": a.label])
+                    say("Alarm \(a.label): sent to the puck again (it had lost it)")
+                } else {
+                    alarms.removeAll { $0.id == a.id }
+                    notifyPuck(title: "Missed alarm", body: "\(a.label) came due while the puck was unplugged.")
+                }
+            }
+        }
+        if pbFirmware >= 3, let end = timerEnd {
+            let left = Int(end.timeIntervalSince(now).rounded())
+            if left > 1 { send(["t": "pb.timer", "seconds": left, "label": "Timer"]) } else { timerEnd = nil }
+        }
+        publish()
+    }
+
+    /// A notice on the puck that isn't a chat's (a missed alarm): a card under the first chat's name.
+    func notifyPuck(title: String, body: String) {
+        guard greeted else { macNotify(title: title, body: body); return }
+        let chat = allRows.first { $0.id == lastOpenedId } ?? allRows.first
+        send(["t": "summary", "agentId": chat?.id ?? "claude", "name": title, "engine": engine, "machine": MACHINE_NAME,
+              "recap": String(body.prefix(190)), "text": body])
+    }
+
+    /// The Mac's own notification, for when the puck isn't there to say it (Pref macNotify).
+    func macNotify(title: String, body: String) {
+        guard Pref.macNotify else { return }
+        let c = UNUserNotificationCenter.current()
+        c.requestAuthorization(options: [.alert, .sound]) { ok, _ in
+            guard ok else { NSSound(named: "Glass")?.play(); return }
+            let n = UNMutableNotificationContent()
+            n.title = title; n.body = body; n.sound = .default
+            c.add(UNNotificationRequest(identifier: UUID().uuidString, content: n, trigger: nil))
+        }
+        say("Mac notification: \(title)")
+    }
+
+    /// Without the puck, its alarms and timer still go off — on the Mac.
+    func macAlarms(now: Date) {
+        guard !greeted else { return }
+        for a in alarms where a.at <= now && !macDue.contains(a.id) {
+            macDue.insert(a.id)
+            macNotify(title: "Alarm", body: a.label == "Alarm" ? "It's \(alarmTime(a.at))." : "\(a.label) (\(alarmTime(a.at)))")
+        }
+        if let end = timerEnd, end <= now {
+            timerEnd = nil
+            macNotify(title: "Timer", body: "Your timer finished.")
+            publish()
+        }
+    }
     func setAlarm(at when: Date, label: String) {
         guard greeted, pbFirmware >= 6 else { return }
         let secs = Int(when.timeIntervalSinceNow.rounded())
@@ -2701,6 +2931,8 @@ final class Bridge {
             if alarms.isEmpty { return "No alarms are set" }
             clearAlarms()
             return "Alarms cleared"
+        case .stopClaude:
+            return "Claude isn't writing"   // answered in finishVoice, which knows the chat
         }
     }
     func cancelTimer() {
@@ -2722,6 +2954,7 @@ final class Bridge {
         guard greeted, pbFirmware >= 4 else { return }
         var m: [String: Any] = ["t": "pb.ui", "lists": Pref.listStyle]
         if pbFirmware >= 5 { m["theme"] = puckThemeNow() }   // firmware pb.6
+        if pbFirmware >= 7 { m["hints"] = Pref.clockHints }   // firmware pb.8
         send(m)
         say("Puck lists → \(listStyleName(Pref.listStyle))\(pbFirmware >= 5 ? ", \(puckThemeNow()) theme" : "")")
     }
@@ -2800,13 +3033,17 @@ final class Bridge {
         }
         f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
         let w = weather?.snapshot()
+        let midnight = Calendar.current.startOfDay(for: now)
         send(["t": "ambient", "time": time, "ampm": ampm, "date": f.string(from: now),
-              "temp": w?.temp ?? "", "cond": w?.cond ?? "", "hilo": w?.hilo ?? "", "idleMin": Pref.idleMin])
+              "temp": w?.temp ?? "", "cond": w?.cond ?? "", "hilo": w?.hilo ?? "", "idleMin": Pref.idleMin,
+              // firmware pb.8 keeps time from these while the Mac sleeps or the cable is out
+              "secs": Int(now.timeIntervalSince(midnight)) % 86400, "h24": Pref.clock24])
         let cal = Calendar.current
         nextAmbient = cal.date(byAdding: .minute, value: 1, to: cal.dateInterval(of: .minute, for: now)?.start ?? now) ?? now.addingTimeInterval(60)
     }
 
     func openChat(_ id: String, why: String) {
+        readyIds.remove(id)
         let v = claude.read()
         if let chat = v.chats.first(where: { $0.id == id }) { opened(chat, why: why); return }
         // On Claude's other mode (or remembered from the last run): switch the sidebar, then open it (finishPendingOpen).
@@ -3031,13 +3268,14 @@ final class Bridge {
         }
         let lastOpened = lastOpenedId
         let known = allRows.first { $0.id == turn.agentId }
+        let hints = Array(Set(codeProjects + allRows.prefix(60).map { $0.title }.filter { $0.count <= 40 }))
         say("Voice: \(turn.pcm.count / 1024) KB of audio, transcribing…")
         Transcriber.authorize { ok in
             guard ok else {
                 say("Speech Recognition permission is off (System Settings → Privacy & Security → Speech Recognition)")
                 reply(["t": "voice.error", "message": "Allow Speech Recognition for Puck Bridge"]); return
             }
-            self.transcriber.transcribe(pcm: turn.pcm, rate: turn.rate, lang: turn.lang) { result in
+            self.transcriber.transcribe(pcm: turn.pcm, rate: turn.rate, lang: turn.lang, hints: hints) { result in
                 switch result {
                 case .failure(let e):
                     say("Voice: \(e.localizedDescription)")
@@ -3053,8 +3291,10 @@ final class Bridge {
                             switch cmd {
                             case .timer, .stopTimer: if !timers { b.deliverVoice(textOut, turn, known, lastOpened, reply); return }
                             case .alarm, .clearAlarms: if !alarms { b.deliverVoice(textOut, turn, known, lastOpened, reply); return }
+                            case .stopClaude: break
                             }
-                            let said = b.runVoiceCommand(cmd)
+                            let said = cmd == .stopClaude ? (b.stopTurn(turn.agentId) ? "Stopping Claude" : "Claude isn't writing")
+                                                          : b.runVoiceCommand(cmd)
                             say("Voice: a command for the puck (\(said))")
                             var m: [String: Any] = ["t": "voice.transcript", "routeId": "", "text": said,
                                                     "agentId": turn.agentId ?? "claude", "agentName": "Puck", "needsConfirm": false]
@@ -3069,21 +3309,41 @@ final class Bridge {
         }
     }
 
-    /// Voice for Claude: into the chat's message box (deliver), then the transcript back to the puck.
+    /// What became of words typed into Claude (deliver). The puck is told the truth: before 0.8.4 it showed every
+    /// transcript as sent, even when nothing reached Claude (UX review).
+    enum Delivery: Equatable {
+        case sent                 // pasted and Send pressed
+        case typed                // pasted; Send is the person's (the paste-only setting)
+        case kept(String)         // pasted but not sent, and why ("There was a draft…")
+        case failed(String)       // nothing landed, and why
+    }
+
+    /// Voice for Claude: into the chat's message box (deliver), then the outcome back to the puck.
     func deliverVoice(_ textOut: String, _ turn: VoiceTurn, _ known: Chat?, _ lastOpened: String,
                       _ reply: @escaping ([String: Any]) -> Void) {
         deliverQueue.async {
-            let target = self.deliver(textOut, to: turn.agentId, known: known, lastOpened: lastOpened)
-            reply(["t": "voice.transcript", "routeId": "", "text": textOut,
-                   "agentId": target?.id ?? (turn.agentId ?? "claude"),
-                   "agentName": target?.title ?? "Claude", "needsConfirm": false])
+            let (target, outcome) = self.deliver(textOut, to: turn.agentId, known: known, lastOpened: lastOpened)
+            switch outcome {
+            case .failed(let why):
+                say("Voice: not delivered (\(why))")
+                reply(["t": "voice.error", "message": why])
+            case .kept(let why):
+                reply(["t": "voice.transcript", "routeId": "", "text": textOut,
+                       "agentId": target?.id ?? (turn.agentId ?? "claude"),
+                       "agentName": target?.title ?? "Claude", "needsConfirm": false])
+                self.perform { $0.toast(why) }
+            case .sent, .typed:
+                reply(["t": "voice.transcript", "routeId": "", "text": textOut,
+                       "agentId": target?.id ?? (turn.agentId ?? "claude"),
+                       "agentName": target?.title ?? "Claude", "needsConfirm": false])
+            }
         }
     }
 
     /// Put the words into Claude's message box (in the chat picked on the puck) and, if enabled, send.
     /// Runs on deliverQueue (it sleeps), so bridge state is only changed through perform.
     @discardableResult
-    func deliver(_ words: String, to chatId: String?, known: Chat?, lastOpened: String) -> Chat? {
+    func deliver(_ words: String, to chatId: String?, known: Chat?, lastOpened: String) -> (Chat?, Delivery) {
         var v = claude.read()
         var target: Chat?
         var switched = false
@@ -3121,7 +3381,16 @@ final class Bridge {
         let before = NSWorkspace.shared.frontmostApplication
         let wasFront = before?.bundleIdentifier == CLAUDE_BUNDLE
         v = claude.read()
-        guard let box = v.composer else { say("Voice: couldn't find Claude's message box"); return target }
+        guard let box = v.composer else {
+            say("Voice: couldn't find Claude's message box")
+            return (target, .failed("Couldn't find Claude's message box. Open the chat on your Mac and try again."))
+        }
+        if chatId != nil && target == nil {
+            return (nil, .failed("Couldn't find that chat in Claude. Open it on your Mac and try again."))
+        }
+        // A half-written message stays: the words are added to it, and nothing is sent (UX review: a draft used to go
+        // out with the dictation stuck on the end).
+        let draft = !v.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         AXUIElementSetAttributeValue(box, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         Thread.sleep(forTimeInterval: 0.15)
 
@@ -3158,7 +3427,8 @@ final class Bridge {
             }
             guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == CLAUDE_BUNDLE else {
                 pb.clearContents(); if !saved.isEmpty { pb.writeObjects(saved) }
-                say("Voice: Claude didn't come to the front; not typing"); return target
+                say("Voice: Claude didn't come to the front; not typing")
+                return (target, .failed("Claude didn't come to the front, so nothing was typed. Try again."))
             }
             flashed = !wasFront
             if let b = claude.read().composer { AXUIElementSetAttributeValue(b, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
@@ -3175,14 +3445,24 @@ final class Bridge {
             if flashed, let b = before { Thread.sleep(forTimeInterval: 0.3); b.activate() }
         }
 
-        if Pref.voiceSends {
-            let after = claude.read()
-            if let sendBtn = after.sendButton { claude.press(sendBtn); say("Voice: sent") }
-            else { say("Voice: pasted, but the Send button wasn't found — press Return to send") }
-        } else {
-            say("Voice: pasted into Claude (review and send)")
+        // Landed: the box holds the words, or at least has a Send button (it appears only once the box has text; the
+        // box's rich text doesn't always read back).
+        let after = claude.read()
+        guard after.composerText.contains(probe) || after.sendButton != nil else {
+            say("Voice: the words didn't reach Claude's message box")
+            return (target, .failed("The words didn't reach Claude. Open the chat on your Mac and try again."))
         }
-        return target
+        if draft {
+            say("Voice: added to a draft in Claude; not sent")
+            return (target, .kept("Added to your draft in Claude. Not sent."))
+        }
+        if Pref.voiceSends {
+            if let sendBtn = after.sendButton { claude.press(sendBtn); say("Voice: sent"); return (target, .sent) }
+            say("Voice: pasted, but the Send button wasn't found — press Return to send")
+            return (target, .kept("Typed into Claude, but Send wasn't there. Press Return on your Mac."))
+        }
+        say("Voice: pasted into Claude (review and send)")
+        return (target, .typed)
     }
 
     // ---------- Claude watching ----------
@@ -3258,6 +3538,8 @@ final class Bridge {
         var cur = claude.read()
         let first = !claudeReadOnce
         claudeReadOnce = true
+        if cur.chats.isEmpty && cur.composer == nil && cur.modeButtons.isEmpty { if blindSince == nil { blindSince = Date() } }
+        else { blindSince = nil }
 
         if cur.chats.isEmpty && !prev.chats.isEmpty {
             emptyReads += 1
@@ -3525,14 +3807,22 @@ final class Bridge {
             }
             if greeted && now >= nextPing { send(["t": "ping"]); nextPing = now.addingTimeInterval(10) }
             watchCodeFiles(now: now)
+            checkHealth(now: now)
+            if now >= rearmAt { rearm(now: now) }
+            macAlarms(now: now)
             // The puck forgets a tile is busy 25 s after the last turn.started (ui_prune_stale_busy): keep it fresh so
             // the character keeps working and the small button can still stop Claude.
             if now >= nextBusyRefresh {
                 // A chat left in the background can't be watched (Claude Desktop shows nothing for it): stop calling
                 // it busy after a while. Coming back to it settles it either way.
-                for (id, b) in busy where (b.awaySince.map { now.timeIntervalSince($0) > 20 * 60 } ?? false) {
+                for (id, b) in busy where (b.awaySince.map { now.timeIntervalSince($0) > 20 * 60 } ?? false) && !fileBusy.contains(id) {
                     say("Gave up waiting on a chat in the background (20 min)")
                     endBusy(id)
+                    // Not "finished": Claude Desktop shows nothing for a chat off screen, so say what we don't know
+                    // (0.8.4; review: the plain turn.done read as an all-clear).
+                    let row = allRows.first { $0.id == id }
+                    notify(row, "Lost track of this chat after 20 minutes in the background. Open it to check whether Claude finished.",
+                           plain: true)
                 }
                 if greeted { for id in busy.keys { sendTurnStarted(id, "Writing…") } }
                 nextBusyRefresh = busy.isEmpty ? .distantFuture : now.addingTimeInterval(10)
@@ -3706,7 +3996,7 @@ final class Updater {
     func install(_ up: Update, fail: @escaping (String) -> Void) {
         let appPath = Bundle.main.bundlePath
         let parent = (appPath as NSString).deletingLastPathComponent
-        guard FileManager.default.isWritableFile(atPath: parent) else { fail("Can't write to \(parent)."); return }
+        guard FileManager.default.isWritableFile(atPath: parent) else { fail("Puck Bridge can't replace itself where it is (\(parent)). Move it to your Applications folder and try again."); return }
         say("Updates: downloading \(up.label) (\(up.version))…")
         URLSession.shared.downloadTask(with: up.url) { tmp, _, err in
             guard let tmp = tmp else { fail(err?.localizedDescription ?? "Download failed"); return }
@@ -3734,7 +4024,7 @@ final class Updater {
 // ============================================================================================
 // MARK: Settings window (SwiftUI)
 // ============================================================================================
-enum SettingsTab: Hashable { case general, character, puck, claude, advanced }
+enum SettingsTab: Hashable { case general, character, puck, timers, claude, advanced }
 
 /// The UI's view of everything. Lives on the main thread; talks to the bridge only through `bridge.perform`.
 final class AppModel: ObservableObject {
@@ -3757,7 +4047,12 @@ final class AppModel: ObservableObject {
     @Published var brightnessDraft: Double?
     @Published var advancedNote = ""
     @Published var weatherNote = ""
-    @Published var skipped: Set<SetupStep> = []
+    /// Steps skipped in the Setup window, remembered (0.8.4: it reopened at every login while one was missing).
+    @Published var skipped: Set<SetupStep> = Set((UserDefaults.standard.array(forKey: "setupSkipped") as? [Int] ?? []).compactMap { SetupStep(rawValue: $0) }) {
+        didSet { UserDefaults.standard.set(skipped.map { $0.rawValue }, forKey: "setupSkipped") }
+    }
+    /// The Setup window opens by itself only for a missing step nobody chose to skip.
+    var setupWanted: Bool { setupSteps.contains { !granted($0) && !skipped.contains($0) } }
     let weather = WeatherService()
     let helper = AccessibilityHelper()
     let signedAs = signingIdentity()
@@ -3780,9 +4075,46 @@ final class AppModel: ObservableObject {
     }
 
     func update(_ s: Snapshot) {
+        let wasConnected = snap.puckSettings != nil
         snap = s
         if s.axTrusted != axTrusted { axTrusted = s.axTrusted }
         onChange?()
+        // The first time a puck reports its settings with the finish beep off (how a fresh puck ships), ask once
+        // (0.8.4; review: the first impression was "nothing happens when Claude finishes").
+        if !wasConnected, let ps = s.puckSettings, ps.muted, !UserDefaults.standard.bool(forKey: "beepAsked") {
+            UserDefaults.standard.set(true, forKey: "beepAsked")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                let a = NSAlert()
+                a.messageText = "Beep when Claude finishes?"
+                a.informativeText = "The puck's sound is off. Turn it on to hear a chime when Claude finishes a reply. You can change it any time in Settings → Puck → Sound."
+                a.addButton(withTitle: "Turn On"); a.addButton(withTitle: "Not Now")
+                NSApp.activate()
+                if a.runModal() == .alertFirstButtonReturn { self.setPuck("muted", false); self.testAlert() }
+            }
+        }
+    }
+
+    /// The build changed since the last launch (an update): macOS may have forgotten its permissions.
+    lazy var justUpdated: Bool = {
+        let d = UserDefaults.standard, v = updater.current
+        let last = d.string(forKey: "lastRunVersion")
+        d.set(v, forKey: "lastRunVersion")
+        return last != nil && last != v
+    }()
+
+    /// "Reset and Allow Again" (0.8.4; review: after an update of an unsigned build macOS keeps a stale entry that
+    /// looks switched on and does nothing). tccutil clears this app's own entries (no password), then the usual path.
+    func resetPermissions() {
+        for service in ["Accessibility", "SpeechRecognition"] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            p.arguments = ["reset", service, Bundle.main.bundleIdentifier ?? "dev.sinitiere.puckbridge"]
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+        }
+        say("Permissions reset; asking again")
+        startAccessibilityHelp()
+        refreshPermissions()
     }
 
     func refreshPermissions() {
@@ -3793,9 +4125,9 @@ final class AppModel: ObservableObject {
     }
 
     var puckDetail: String {
-        if snap.released { return "OpenHarness has the puck. Take it back under Advanced." }
-        if !snap.puckConnected { return "Plug the puck into this Mac with its USB cable." }
-        return snap.hw.isEmpty ? "" : "Hardware \(snap.hw)"
+        if snap.released { return "OpenHarness is using it until you take it back." }
+        if !snap.puckConnected { return "Plug it into this Mac with its USB cable. If it is plugged in, another app (OpenHarness?) may have it." }
+        return snap.pbFirmware >= 1 ? "Puck Bridge firmware" : "Autonomous's firmware"
     }
 
     // ---------- characters ----------
@@ -3923,14 +4255,14 @@ final class AppModel: ObservableObject {
     func installFirmware() {
         guard let img = FirmwareImage.bundled else { return }
         let a = NSAlert()
-        a.messageText = "Install Puck Bridge firmware \(img.version) on the puck?"
+        a.messageText = snap.pbFirmware >= 1 ? "Update the puck's Puck Bridge firmware?" : "Install Puck Bridge's firmware on your puck?"
         a.informativeText = """
-            Adds a clock and weather face when the puck is idle, and makes the small button a home button \
-            (tap: clock · hold while Claude writes: stop · hold otherwise: screen off/on).
+            \(snap.fw.isEmpty ? "" : "Now: \(snap.fw). ")After: \(img.version).
 
-            It takes about a minute over the cable. Keep the puck plugged in until it restarts. The puck keeps its \
-            previous firmware as a fallback, and Settings → Puck → Restore Official Firmware puts Autonomous's \
-            firmware back. (OpenHarness also reinstalls official firmware if it ever connects.)
+            It adds a clock with weather, timers and alarms, the new screens and sounds. It takes about a minute over \
+            the cable; keep the puck plugged in until it restarts. If anything goes wrong, Restore (in the same place) \
+            puts Autonomous's firmware back, and holding the puck's small button while plugging it in starts its \
+            recovery mode.
             """
         a.addButton(withTitle: "Install"); a.addButton(withTitle: "Cancel")
         NSApp.activate()
@@ -3939,17 +4271,18 @@ final class AppModel: ObservableObject {
     }
     func restoreOfficialFirmware() {
         let a = NSAlert()
-        a.messageText = "Put the official firmware back on the puck?"
-        a.informativeText = "Puck Bridge downloads Autonomous's current firmware for the round puck, checks it, and installs it over the cable. The clock face and home button go away."
+        a.messageText = "Go back to Autonomous's firmware?"
+        a.informativeText = "You'll lose the clock, timers, alarms and the new screens. Puck Bridge downloads Autonomous's firmware, checks it and installs it over the cable (about a minute)."
         a.addButton(withTitle: "Restore"); a.addButton(withTitle: "Cancel")
         NSApp.activate()
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        snap.fwNote = "Downloading the official firmware…"
+        Pref.pbInstalled = false   // chosen: not "something replaced it"
+        snap.fwNote = "Downloading Autonomous's firmware…"
         FirmwareImage.official { result in
             DispatchQueue.main.async {
                 switch result {
                 case .success(let img): self.bridge.perform { $0.offerFirmware(img) }
-                case .failure(let e): self.snap.fwNote = ""; self.alert("Couldn't get the official firmware", e.localizedDescription)
+                case .failure(let e): self.snap.fwNote = ""; self.alert("Couldn't download Autonomous's firmware", "Check the internet connection and try again.\n\n(\(e.localizedDescription))")
                 }
             }
         }
@@ -3984,7 +4317,8 @@ final class AppModel: ObservableObject {
         }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
-    var setupSteps: [SetupStep] { Pref.weatherOn ? SetupStep.allCases : [.accessibility, .speech] }
+    // Location only once the puck has a clock to show the weather on (Puck Bridge firmware).
+    var setupSteps: [SetupStep] { Pref.weatherOn && Pref.pbInstalled ? SetupStep.allCases : [.accessibility, .speech] }
     func granted(_ s: SetupStep) -> Bool {
         switch s {
         case .accessibility: return axTrusted
@@ -4028,7 +4362,7 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 if let up = up {
                     self.updateVersion = up.version
-                    self.updateNote = "\(up.label.prefix(1).uppercased() + up.label.dropFirst()) is available."
+                    self.updateNote = "Version \(up.version) is available."
                     self.onChange?()
                     if interactive { self.confirmInstall(up) }
                 } else if let e = error {
@@ -4049,7 +4383,7 @@ final class AppModel: ObservableObject {
         let a = NSAlert()
         a.messageText = "Install \(up.label)?"
         a.informativeText = (up.notes.isEmpty ? "" : String(up.notes.prefix(600)) + "\n\n")
-            + "Version \(up.version). The app will restart." + (signedAs == nil ? " You may need to re-allow Accessibility afterwards." : "")
+            + "Puck Bridge will quit and reopen." + (signedAs == nil ? " Because this copy isn't signed, macOS will ask you to allow Accessibility again; Settings → General has a button for that." : "")
         a.addButton(withTitle: "Install"); a.addButton(withTitle: "Later")
         NSApp.activate()
         if a.runModal() == .alertFirstButtonReturn {
@@ -4090,7 +4424,7 @@ final class AppModel: ObservableObject {
     func lend() {
         let a = NSAlert()
         a.messageText = "Lend the puck to OpenHarness?"
-        a.informativeText = "Puck Bridge lets go of the puck and starts OpenHarness's service, which may update the puck's firmware. Your chats won't show on the puck until you take it back (Settings → Advanced)."
+        a.informativeText = "OpenHarness will take over the puck, and it will probably put Autonomous's firmware back, replacing Puck Bridge's (the clock, timers, alarms). Your chats won't show on the puck until you take it back: menu bar ◎ → Take the Puck Back."
         a.addButton(withTitle: "Lend It"); a.addButton(withTitle: "Cancel")
         NSApp.activate()
         guard a.runModal() == .alertFirstButtonReturn else { return }
@@ -4101,17 +4435,26 @@ final class AppModel: ObservableObject {
         Pref.takePuck = true
         bridge.perform { $0.takeBack() }
     }
-    func reconnect() { bridge.perform { $0.reconnect() }; advancedNote = "Reconnecting…" }
+    func reconnect() {
+        bridge.perform { $0.reconnect() }
+        advancedNote = "Looking for the puck…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            self.advancedNote = self.snap.puckConnected ? "The puck is connected." : "Couldn't find the puck. Check the cable."
+        }
+    }
     func testAlert() {
         bridge.perform { $0.testAlert() }
-        advancedNote = snap.puckConnected ? "Sent. The puck should beep (if its beep is on) and show a card." : "The puck isn't connected."
+        advancedNote = !snap.puckConnected ? "The puck isn't connected."
+            : snap.puckSettings?.muted == true ? "Sent. The puck's sound is off, so it shows a card without a chime."
+            : "Sent. You should hear a chime and see a card on the puck."
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.advancedNote = "" }
     }
     func copyDiagnostics() {
         let s = snap
         let ps = s.puckSettings.map { "brightness \($0.brightness), beep \($0.muted ? "off" : "on"), calm \($0.quiet), scroll reversed \($0.scrollReversed), voice \($0.voiceLang)" } ?? "not reported"
         let lines = [
             "Puck Bridge v\(versionLine) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString) · \(signedAs.map { "signed as \($0)" } ?? "ad-hoc signed")",
-            s.puck + (s.hw.isEmpty ? "" : " · hw \(s.hw)") + (s.pbFirmware >= 1 ? " · Puck Bridge firmware" : "")
+            s.puck + (s.fw.isEmpty ? "" : " · fw \(s.fw)") + (s.hw.isEmpty ? "" : " · hw \(s.hw)") + (s.pbFirmware >= 1 ? " · Puck Bridge firmware" : "") + (s.health.isEmpty ? "" : " · health: \(s.health)")
                 + " · bundled firmware: \(FirmwareImage.bundled?.version ?? "none")",
             "Puck settings: \(ps)",
             "Character: \(characterName(s.character)) (\(s.character))\(s.petsSupported ? "" : " · custom characters not supported")\(s.petNote.isEmpty ? "" : " · \(s.petNote)")",
@@ -4165,31 +4508,64 @@ struct PermissionRow: View {
 struct GeneralPane: View {
     @ObservedObject var model: AppModel
     var body: some View {
+        let s = model.snap
         Form {
-            Section("Status") {
-                StatusRow(ok: model.snap.puckConnected, title: model.snap.puck, detail: model.puckDetail)
+            /*
+             * HEALTH (0.8.4): one row per thing Puck Bridge needs, each with what to do about it. Replaces two status
+             * lines that said "Puck: not connected" for four different reasons.
+             */
+            Section("Health") {
                 HStack {
-                    StatusRow(ok: model.snap.claudeRunning && model.axTrusted, title: model.snap.claude,
-                              detail: model.snap.writing ? "Claude is writing a reply." : "")
+                    StatusRow(ok: s.puckConnected, title: s.puckConnected ? "Puck connected" : s.released ? "Puck lent to OpenHarness" : "Puck not found",
+                              detail: model.puckDetail)
                     Spacer()
-                    if !model.snap.claudeRunning { Button("Open Claude") { model.openClaude() } }
+                    if s.released { Button("Take It Back") { model.takeBack() } }
+                    else if !s.puckConnected { Button("Look Again") { model.reconnect() } }
+                }
+                HStack {
+                    StatusRow(ok: s.health.isEmpty && s.claudeRunning,
+                              title: !s.claudeRunning ? "Claude isn't open" : s.health.isEmpty ? "Claude is visible" : s.health,
+                              detail: s.claudeRunning ? s.claude.replacingOccurrences(of: "Claude: ", with: "") : "Puck Bridge works with the Claude app on this Mac.")
+                    Spacer()
+                    if !s.claudeRunning { Button("Open Claude") { model.openClaude() } }
+                }
+                if let ps = s.puckSettings {
+                    HStack {
+                        StatusRow(ok: !ps.muted, title: ps.muted ? "The finish chime is off" : "The finish chime is on",
+                                  detail: ps.muted ? "The puck shows a card when Claude finishes, silently." : "")
+                        Spacer()
+                        if ps.muted { Button("Turn On") { model.setPuck("muted", false); model.testAlert() } }
+                    }
+                }
+                if s.stockFirmware {
+                    HStack {
+                        StatusRow(ok: false, title: "Puck Bridge firmware was replaced",
+                                  detail: "Something (OpenHarness, most likely) put Autonomous's firmware back.")
+                        Spacer()
+                        Button("Reinstall…") { model.installFirmware() }.disabled(!s.puckConnected || s.fwBusy)
+                    }
                 }
             }
             Section("Permissions") {
                 PermissionRow(title: "Accessibility", detail: "Lets Puck Bridge see your Claude chats, open them, and type for you.",
-                              granted: model.axTrusted, action: model.openAccessibility)
-                PermissionRow(title: "Speech Recognition", detail: "Turns what you say into the puck into text, on this Mac.",
+                              granted: model.axTrusted, action: model.startAccessibilityHelp)
+                PermissionRow(title: "Speech Recognition", detail: "Turns what you say to the puck into text. On this Mac when your language supports it.",
                               granted: model.speech == .authorized, action: model.fixSpeech)
                 if Pref.weatherOn {
-                    PermissionRow(title: "Location", detail: "For the weather on the puck's clock face. Only a rounded location goes to Open-Meteo.",
+                    PermissionRow(title: "Location", detail: "For the weather on the puck's clock. Only a rounded location goes to Open-Meteo.",
                                   granted: model.locationAllowed, action: model.allowLocation)
                 }
-                if model.needsSetup {
-                    HStack { Spacer(); Button("Walk Me Through It…") { model.showSetup?() } }
-                }
                 if !model.axTrusted {
-                    Text("Already switched on in System Settings? After an update macOS can keep a stale entry. Select Puck Bridge in the list, remove it with −, then add it again with +.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text(model.justUpdated || model.signedAs == nil
+                             ? "Switched on, but Claude still isn't visible? macOS forgets approvals when an unsigned app is updated."
+                             : "Switched on, but Claude still isn't visible? macOS can keep a stale entry.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Reset and Allow Again") { model.resetPermissions() }
+                    }
+                } else if model.needsSetup {
+                    HStack { Spacer(); Button("Walk Me Through It…") { model.showSetup?() } }
                 }
             }
             Section("App") {
@@ -4202,15 +4578,24 @@ struct GeneralPane: View {
                     }
                 }
                 LabeledContent("Version", value: model.versionLine)
-                LabeledContent("Signature", value: model.signedAs.map { "Signed as \($0)" } ?? "Ad-hoc")
                 if model.signedAs == nil {
-                    Text("macOS asks for permissions again after every update of an ad-hoc build. Setting up signing once stops that (README: Keep macOS permissions across updates).")
-                        .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("After updates", value: "macOS asks for permissions again")
+                    HStack {
+                        Text("This copy isn't signed with a certificate, so macOS forgets its permissions after each update. Setting up signing once stops that.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Link("How…", destination: URL(string: "https://github.com/mattsinitiere/puckbridge#keep-macos-permissions-across-updates")!)
+                    }
+                } else {
+                    LabeledContent("Signed as", value: model.signedAs ?? "")
                 }
+            }
+            Section("Updates") {
                 HStack {
-                    Button(model.updateVersion.map { "Install v\($0)…" } ?? "Check for Updates…") { model.checkUpdates(interactive: true) }
+                    Button(model.updateVersion.map { "Install Version \($0)…" } ?? "Check for Updates…") { model.checkUpdates(interactive: true) }
                     Text(model.updateNote).font(.caption).foregroundStyle(.secondary)
                 }
+                Text("Puck Bridge checks once a day and asks before installing.").font(.caption).foregroundStyle(.secondary)
             }
             BetaSection(model: model)
         }
@@ -4333,12 +4718,6 @@ struct CharacterPane: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Find characters on petdex.dev", destination: URL(string: "https://petdex.dev")!)
             }
-            Section("On the puck") {
-                Toggle("Show a Settings tab on the puck", isOn: $puckTiles)
-                    .onChange(of: puckTiles) { _, _ in model.refreshPuckList() }
-                Text("Hold the puck's face to see its tabs, then pick Settings for Character, Beep, Brightness and Calm mode. Stop on one, then tap the face twice to change it. Or tap, say what you want (\"Jolly\", \"60\", \"off\"), and tap again.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
     }
@@ -4351,26 +4730,40 @@ struct FirmwareSection: View {
         Section("Firmware") {
             if let img = FirmwareImage.bundled {
                 if s.pbFirmware >= 1 && s.fw == img.version {
-                    Text("Puck Bridge firmware \(img.version) is on the puck: the clock face and home button are on.")
+                    LabeledContent("On the puck", value: "Puck Bridge firmware, up to date")
                 } else {
                     HStack {
-                        Text(s.pbFirmware >= 1 ? "A newer Puck Bridge firmware is available (\(img.version))." : "Puck Bridge firmware \(img.version)")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(s.pbFirmware >= 1 ? "An update for the puck is ready" : "Puck Bridge firmware")
+                            Text(s.puckConnected ? "On the puck: \(s.pbFirmware >= 1 ? "Puck Bridge" : "Autonomous's") firmware (\(s.fw)). New: \(img.version)."
+                                                 : "Plug in the puck to install it.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Button(s.pbFirmware >= 1 ? "Update…" : "Install…") { model.installFirmware() }
                             .disabled(!s.puckConnected || s.fwBusy || s.isPro)
                     }
-                    Text("Adds a clock and weather face when the puck is idle, and makes the small button a home button: tap for the clock, hold while Claude writes to stop it, hold otherwise to turn the screen off or on.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if s.pbFirmware < 1 {
+                        Text("Adds a clock with weather, timers and alarms, list styles, light mode, and the new screens and gestures.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } else {
                 Text("This build of Puck Bridge doesn't include puck firmware.").foregroundStyle(.secondary)
             }
-            HStack {
-                Text("Official firmware from Autonomous").foregroundStyle(.secondary)
-                Spacer()
-                Button("Restore…") { model.restoreOfficialFirmware() }.disabled(!s.puckConnected || s.fwBusy || s.isPro)
+            if let p = s.fwProgress {
+                ProgressView(value: p) { Text("Installing on the puck. Keep it plugged in.").font(.caption) }
             }
-            if !s.fwNote.isEmpty { Text(s.fwNote).font(.caption) }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Autonomous's firmware").foregroundStyle(.secondary)
+                    if s.puckConnected && s.pbFirmware == 0 { Text("Already on the puck.").font(.caption).foregroundStyle(.secondary) }
+                }
+                Spacer()
+                Button("Restore…") { model.restoreOfficialFirmware() }
+                    .disabled(!s.puckConnected || s.fwBusy || s.isPro || s.pbFirmware == 0 || s.fwNote.hasPrefix("Downloading"))
+            }
+            if !s.fwNote.isEmpty && s.fwProgress == nil { Text(s.fwNote).font(.caption) }
         }
     }
 }
@@ -4402,137 +4795,147 @@ struct ClockSection: View {
 
 struct PuckPane: View {
     @ObservedObject var model: AppModel
+    @AppStorage("puckTiles") private var puckTiles = true
+    @AppStorage("clockHints") private var clockHints = true
+    var body: some View {
+        let snap = model.snap
+        Form {
+            // The Mac's choices for the puck (they don't need it plugged in), then what lives on the puck itself.
+            Section("Display") {
+                Picker("Chat list style", selection: Binding(get: { Pref.listStyle }, set: { model.setListStyle($0) })) {
+                    ForEach(LIST_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
+                }
+                Picker("Appearance", selection: Binding(get: { Pref.puckTheme }, set: { model.setPuckTheme($0) })) {
+                    ForEach(PUCK_THEMES, id: \.id) { t in Text(t.name).tag(t.id) }
+                }
+                Toggle("Show where the swipes go on the clock (the first few times)", isOn: $clockHints)
+                    .onChange(of: clockHints) { _, _ in model.bridge.perform { $0.sendLists() } }
+                if let s = snap.puckSettings {
+                    Slider(value: Binding(get: { model.brightnessDraft ?? Double(s.brightness) }, set: { model.brightnessDraft = $0 }),
+                           in: 5...100, step: 5,
+                           label: { Text(verbatim: "Brightness \(Int(model.brightnessDraft ?? Double(s.brightness)))%") },
+                           onEditingChanged: { editing in if !editing { model.commitBrightness() } })
+                    Toggle("Calm mode", isOn: Binding(get: { s.quiet }, set: { model.setPuck("quiet", $0) }))
+                    Toggle("Reverse swipe direction", isOn: Binding(get: { s.scrollReversed }, set: { model.setPuck("scrollReversed", $0) }))
+                }
+                Text(snap.pbFirmware >= 4 || !snap.puckConnected
+                     ? "Cards: three at a time. Dial: one at a time around the clock's ring. Compact: five rows. Classic: the original pages. Calm mode keeps the character still."
+                     : "List styles and Appearance need Puck Bridge firmware (Firmware, below).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let s = snap.puckSettings {
+                Section("Sound") {
+                    HStack {
+                        Toggle("Chime when Claude finishes", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
+                        Spacer()
+                        Button("Test") { if snap.pbFirmware >= 1 { model.setSound() } else { model.testAlert() } }
+                    }
+                    if snap.pbFirmware >= 1 {
+                        Picker("Sound", selection: Binding(get: { Pref.soundStyle }, set: { model.setSound(style: $0) })) {
+                            ForEach(SOUND_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
+                        }
+                        Slider(value: Binding(get: { Double(Pref.soundVolume) }, set: { Pref.soundVolume = Int($0); model.objectWillChange.send() }),
+                               in: 10...100, step: 5,
+                               label: { Text(verbatim: "Volume \(Pref.soundVolume)%") },
+                               onEditingChanged: { editing in if !editing { model.setSound() } })
+                        Text("Timers and alarms use this sound too, and ring even when the chime is off.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Section {
+                    Text(snap.puckConnected ? "Waiting for the puck to report its settings…" : "Plug in the puck to change its brightness and sound.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ClockSection(model: model)
+            if snap.pbFirmware < 1 {
+                Section("Settings on the puck") {
+                    Toggle("Add a Settings tab to the puck", isOn: $puckTiles)
+                        .onChange(of: puckTiles) { _, _ in model.refreshPuckList() }
+                    Text("For Autonomous's firmware: hold the puck's face for its tabs and pick Settings. Puck Bridge firmware has its own Settings: swipe up from the clock.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            FirmwareSection(model: model)
+            Section("About this puck") {
+                LabeledContent("Firmware", value: snap.fw.isEmpty ? "—" : snap.fw)
+                LabeledContent("Hardware", value: snap.hw.isEmpty ? "—" : snap.hw)
+                LabeledContent("Custom characters", value: snap.puckConnected ? (snap.petsSupported ? "Supported" : "Not supported") : "—")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct TimersPane: View {
+    @ObservedObject var model: AppModel
     @State private var timerH = Pref.timerCustom / 3600
     @State private var timerM = Pref.timerCustom / 60 % 60
     @State private var timerS = Pref.timerCustom % 60
     @State private var alarmAt = Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date()
     @State private var alarmLabel = ""
     var body: some View {
+        let snap = model.snap
         Form {
-            if let s = model.snap.puckSettings {
-                Section("Screen") {
-                    Slider(value: Binding(get: { model.brightnessDraft ?? Double(s.brightness) }, set: { model.brightnessDraft = $0 }),
-                           in: 5...100, step: 5,
-                           label: { Text(verbatim: "Brightness \(Int(model.brightnessDraft ?? Double(s.brightness)))%") },
-                           onEditingChanged: { editing in if !editing { model.commitBrightness() } })
-                    Toggle("Calm mode (the character doesn't react to taps or finished replies)",
-                           isOn: Binding(get: { s.quiet }, set: { model.setPuck("quiet", $0) }))
-                    Toggle("Reverse scrolling", isOn: Binding(get: { s.scrollReversed }, set: { model.setPuck("scrollReversed", $0) }))
-                    Picker("Chat and tab lists", selection: Binding(get: { Pref.listStyle }, set: { model.setListStyle($0) })) {
-                        ForEach(LIST_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
-                    }
-                    .disabled(model.snap.pbFirmware < 4)
-                    Picker("Appearance", selection: Binding(get: { Pref.puckTheme }, set: { model.setPuckTheme($0) })) {
-                        ForEach(PUCK_THEMES, id: \.id) { t in Text(t.name).tag(t.id) }
-                    }
-                    .disabled(model.snap.pbFirmware < 5)
-                    Text(model.snap.pbFirmware >= 4
-                         ? "Cards: a column of cards. Dial: the clock's ring, one item at a time. Compact list: five rows at once. Classic: the original green pages. Also on the puck: Settings → Lists."
-                         : "Needs Puck Bridge firmware 0.0.88-pb.5 or newer (Firmware, below). Appearance needs pb.6.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Section("Sound") {
-                    Toggle("Play a sound when Claude finishes a reply", isOn: Binding(get: { !s.muted }, set: { model.setPuck("muted", !$0) }))
-                    if model.snap.pbFirmware >= 1 {
-                        Picker("Sound", selection: Binding(get: { Pref.soundStyle }, set: { model.setSound(style: $0) })) {
-                            ForEach(SOUND_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
-                        }
-                        .disabled(s.muted)
-                        HStack {
-                            Slider(value: Binding(get: { Double(Pref.soundVolume) }, set: { Pref.soundVolume = Int($0); model.objectWillChange.send() }),
-                                   in: 10...100, step: 5,
-                                   label: { Text(verbatim: "Volume \(Pref.soundVolume)%") },
-                                   onEditingChanged: { editing in if !editing { model.setSound() } })
-                            Button("Test") { model.setSound() }
-                        }
-                        .disabled(s.muted)
-                    } else {
-                        Text("Puck Bridge firmware (below) adds a choice of sounds and a volume control.").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                if model.snap.pbFirmware >= 3 {
-                    Section("Timer") {
-                        HStack {
-                            ForEach([1, 5, 10, 25, 60], id: \.self) { m in
-                                Button(m == 60 ? "1 h" : "\(m) min") { model.bridge.perform { $0.startTimer(minutes: m) } }
-                            }
-                            Spacer()
-                            if let end = model.snap.timerEnd {
-                                Text(timerInterval: Date()...max(Date(), end), countsDown: true).monospacedDigit()
-                                Button("Cancel") { model.bridge.perform { $0.cancelTimer() } }
-                            }
-                        }
-                        if model.snap.pbFirmware >= 6 {
-                            HStack {
-                                Stepper(value: $timerH, in: 0...23) { Text(verbatim: "\(timerH) h") }
-                                Stepper(value: $timerM, in: 0...59) { Text(verbatim: "\(timerM) min") }
-                                Stepper(value: $timerS, in: 0...59, step: 5) { Text(verbatim: "\(timerS) s") }
-                                Spacer()
-                                Button("Start") {
-                                    let secs = timerH * 3600 + timerM * 60 + timerS
-                                    Pref.timerCustom = secs
-                                    model.bridge.perform { $0.startTimer(seconds: secs) }
-                                }
-                                .disabled(timerH * 3600 + timerM * 60 + timerS == 0)
-                            }
-                        }
-                        Text(model.snap.pbFirmware >= 6
-                             ? "The puck counts down by itself (also while this Mac sleeps) and rings at the end. On the puck: tap the line under the clock for the timer dial, or say \"timer 2 hours 15 minutes\" or \"stop the timer\"."
-                             : "The puck counts down by itself (also while this Mac sleeps) and rings at the end. You can also start one on the puck: Settings → Timer.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                if model.snap.pbFirmware >= 6 {
-                    Section("Alarms") {
-                        ForEach(model.snap.alarms) { a in
-                            HStack {
-                                Text(a.at, style: .time).monospacedDigit()
-                                if !Calendar.current.isDateInToday(a.at) { Text(a.at, format: .dateTime.weekday(.abbreviated)).foregroundStyle(.secondary) }
-                                Text(a.label)
-                                Spacer()
-                                Button("Delete") { model.bridge.perform { $0.clearAlarm(a.id) } }
-                            }
-                        }
-                        HStack {
-                            DatePicker("Alarm at", selection: $alarmAt, displayedComponents: .hourAndMinute)
-                            TextField("Label", text: $alarmLabel).frame(maxWidth: 160)
-                            Button("Add") {
-                                // The next time it's this time of day: today, or tomorrow if that's passed.
-                                let c = Calendar.current.dateComponents([.hour, .minute], from: alarmAt)
-                                let when = Calendar.current.nextDate(after: Date(), matching: c, matchingPolicy: .nextTime) ?? alarmAt
-                                let label = alarmLabel
-                                model.bridge.perform { $0.setAlarm(at: when, label: label) }
-                                alarmLabel = ""
-                            }
-                            .disabled(model.snap.alarms.count >= 4)
-                        }
-                        Text("Up to four. They ring on the puck and live in its memory, so unplugging the puck clears them. You can also say \"alarm 7:30 am\", \"alarm in 20 minutes for tea\" or \"cancel my alarms\" to the puck.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Section("Voice") {
-                    Picker("Language you speak to the puck", selection: Binding(get: { s.voiceLang }, set: { model.setPuck("voiceLang", $0) })) {
-                        ForEach(model.languages(including: s.voiceLang), id: \.self) { code in
-                            Text(model.languageName(code)).tag(code)
-                        }
-                    }
-                }
-                Section {
-                    Text(model.snap.settingsNote.isEmpty ? "These settings are stored on the puck itself." : model.snap.settingsNote)
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            } else {
-                Section {
-                    Text(model.snap.puckConnected ? "Waiting for the puck to report its settings…" : "Plug in the puck to change its settings.")
-                        .foregroundStyle(.secondary)
-                }
+            if snap.puckConnected && snap.pbFirmware < 3 {
+                Section { Text("Timers and alarms need Puck Bridge firmware: Settings → Puck → Firmware.").foregroundStyle(.secondary) }
             }
-            FirmwareSection(model: model)
-            ClockSection(model: model)
-            Section("About this puck") {
-                LabeledContent("Firmware", value: model.snap.fw.isEmpty ? "—" : model.snap.fw)
-                LabeledContent("Hardware", value: model.snap.hw.isEmpty ? "—" : model.snap.hw)
-                LabeledContent("Custom characters", value: model.snap.puckConnected ? (model.snap.petsSupported ? "Supported" : "Not supported") : "—")
+            Section("Timer") {
+                if let end = snap.timerEnd {
+                    HStack {
+                        Text(timerInterval: Date()...max(Date(), end), countsDown: true).monospacedDigit().font(.title2)
+                        Spacer()
+                        Button("Stop") { model.bridge.perform { $0.cancelTimer() } }
+                    }
+                }
+                HStack {
+                    ForEach([1, 5, 10, 25, 60], id: \.self) { m in
+                        Button(m == 60 ? "1 h" : "\(m) min") { model.bridge.perform { $0.startTimer(minutes: m) } }
+                    }
+                }
+                .disabled(!snap.puckConnected || snap.pbFirmware < 3)
+                HStack {
+                    Stepper(value: $timerH, in: 0...23) { Text(verbatim: "\(timerH) h") }
+                    Stepper(value: $timerM, in: 0...59) { Text(verbatim: "\(timerM) min") }
+                    Stepper(value: $timerS, in: 0...59, step: 5) { Text(verbatim: "\(timerS) s") }
+                    Spacer()
+                    Button("Start") {
+                        let secs = timerH * 3600 + timerM * 60 + timerS
+                        Pref.timerCustom = secs
+                        model.bridge.perform { $0.startTimer(seconds: secs) }
+                    }
+                    .disabled(timerH * 3600 + timerM * 60 + timerS == 0)
+                }
+                .disabled(!snap.puckConnected || snap.pbFirmware < 6)
+                Text("The puck counts down by itself, also while this Mac sleeps. On the puck: tap the line under the clock. Or say \"timer 2 hours 15 minutes\", \"stop the timer\".")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Alarms") {
+                ForEach(snap.alarms) { a in
+                    HStack {
+                        Text(a.at, style: .time).monospacedDigit()
+                        if !Calendar.current.isDateInToday(a.at) { Text(a.at, format: .dateTime.weekday(.abbreviated)).foregroundStyle(.secondary) }
+                        Text(a.label)
+                        Spacer()
+                        Button("Delete") { model.bridge.perform { $0.clearAlarm(a.id) } }
+                    }
+                }
+                HStack {
+                    DatePicker("Alarm at", selection: $alarmAt, displayedComponents: .hourAndMinute)
+                    TextField("Label", text: $alarmLabel, prompt: Text("Stand-up")).frame(maxWidth: 160)
+                    Button("Add") {
+                        // The next time it's this time of day: today, or tomorrow if that's passed.
+                        let c = Calendar.current.dateComponents([.hour, .minute], from: alarmAt)
+                        let when = Calendar.current.nextDate(after: Date(), matching: c, matchingPolicy: .nextTime) ?? alarmAt
+                        let label = alarmLabel
+                        model.bridge.perform { $0.setAlarm(at: when, label: label) }
+                        alarmLabel = ""
+                    }
+                    .disabled(snap.alarms.count >= 4 || !snap.puckConnected || snap.pbFirmware < 6)
+                }
+                Text("Up to four. They ring on the puck (tap to snooze 9 minutes), even with the chime off. If the puck is unplugged, Puck Bridge puts them back when it returns, or tells you on the Mac when one comes due. Say \"alarm 7:30 am\", \"alarm in 20 minutes for tea\" or \"cancel my alarms\" to the puck.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -4548,6 +4951,7 @@ struct ClaudePane: View {
     @AppStorage("bringForward") private var bringForward = false
     @AppStorage("showReply") private var showReply = true
     @AppStorage("voiceSends") private var voiceSends = true
+    @AppStorage("macNotify") private var macNotify = true
     var body: some View {
         Form {
             Section("Chats") {
@@ -4559,15 +4963,16 @@ struct ClaudePane: View {
                     .onChange(of: codeTabs) { _, _ in model.refreshCode() }
                 Text("On the puck, swipe left from the clock for your Claude Code projects (with the Classic list style, hold the face for the tabs): one per project, as Claude's sidebar groups them (folded projects too). Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that, also when you fold a project. Picking a project on the puck switches Claude to its Code view and unfolds that project.")
                     .font(.caption).foregroundStyle(.secondary)
-                Toggle("List folded projects' sessions from Claude Code's files", isOn: $codeFiles)
+                Toggle("Follow sessions in Claude Code's files", isOn: $codeFiles)
                     .onChange(of: codeFiles) { _, _ in model.refreshCode() }
-                Text("Claude's sidebar shows no sessions for a folded project. Puck Bridge can read them from Claude Code's session files on this Mac (~/.claude/projects) instead, and see when one is working. Sessions that run in the cloud aren't there, and a title may differ a little from Claude's.")
+                Text("Claude Code keeps each local session's transcript on this Mac (~/.claude/projects). Puck Bridge reads it to see when a session works, waits on a tool or finishes, even when it isn't on screen or its project is folded, and to list a folded project's sessions. Sessions that run in the cloud aren't there, and a title may differ a little from Claude's.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("When Claude finishes") {
                 Toggle("Show the start of the reply on the puck", isOn: $showReply)
                 Text("Turn this off if other people can see your desk. The puck then only says that Claude finished.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Notify me on the Mac when the puck isn't plugged in", isOn: $macNotify)
             }
             Section("Voice") {
                 Picker("After you speak", selection: $voiceSends) {
@@ -4575,8 +4980,17 @@ struct ClaudePane: View {
                     Text("Type it into Claude, and I'll press Send").tag(false)
                 }
                 .pickerStyle(.radioGroup)
+                Text("If there's already something typed in Claude's box, your words are added to it and not sent.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let s = model.snap.puckSettings {
+                    Picker("Language you speak to the puck", selection: Binding(get: { s.voiceLang }, set: { model.setPuck("voiceLang", $0) })) {
+                        ForEach(model.languages(including: s.voiceLang), id: \.self) { code in
+                            Text(model.languageName(code)).tag(code)
+                        }
+                    }
+                }
                 Toggle("Timers and alarms by voice (\"timer 10 minutes\", \"alarm 7:30\", \"stop the timer\")", isOn: $voiceCommands)
-                Text("Only something that is just a timer or alarm command goes to the puck; everything else still goes to Claude. Needs Puck Bridge firmware.")
+                Text("Also \"stop Claude\". Only something that is just one of these commands goes to the puck (in English); everything else goes to Claude. Needs Puck Bridge firmware.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -4589,6 +5003,7 @@ struct AdvancedPane: View {
     @AppStorage("takePuck") private var takePuck = true
     var body: some View {
         Form {
+            if openHarnessInstalled || model.snap.released {
             Section("OpenHarness") {
                 Toggle("Take the puck from OpenHarness automatically", isOn: $takePuck)
                 if model.snap.released {
@@ -4600,8 +5015,9 @@ struct AdvancedPane: View {
                 } else {
                     Button("Lend the Puck to OpenHarness…") { model.lend() }
                 }
-                Text("OpenHarness updates the puck's firmware when it connects. Lending it the puck for a few minutes now and then keeps the firmware current.")
+                Text("OpenHarness is Autonomous's own app for the puck. Puck Bridge keeps its service from starting while it has the puck. If OpenHarness connects, it puts Autonomous's firmware back, replacing Puck Bridge's.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
             }
             Section("Troubleshooting") {
                 HStack {
@@ -4628,6 +5044,7 @@ struct SettingsView: View {
             GeneralPane(model: model).tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
             CharacterPane(model: model).tabItem { Label("Character", systemImage: "face.smiling") }.tag(SettingsTab.character)
             PuckPane(model: model).tabItem { Label("Puck", systemImage: "circle.circle") }.tag(SettingsTab.puck)
+            TimersPane(model: model).tabItem { Label("Timers", systemImage: "timer") }.tag(SettingsTab.timers)
             ClaudePane(model: model).tabItem { Label("Claude & Voice", systemImage: "text.bubble") }.tag(SettingsTab.claude)
             AdvancedPane(model: model).tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }.tag(SettingsTab.advanced)
         }
@@ -4653,17 +5070,31 @@ struct SetupView: View {
                         .frame(height: 4)
                 }
             }
-            if let step = current { page(step) } else {
+            if let step = current { page(step) } else if model.needsSetup {
+                // Something was skipped: say so, honestly (0.8.4; it used to say "You're all set").
+                Label("Almost there", systemImage: "exclamationmark.circle.fill").font(.title2.weight(.semibold)).foregroundStyle(.orange)
+                Text(model.axTrusted ? "Some permissions are still off. Puck Bridge works without them, minus what they're for."
+                                     : "Accessibility is still off, so Puck Bridge can't see Claude yet.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Settings → General shows what's missing, with a button for each.").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Show Me Again") { model.skipped = [] }
+                    Button("Done") { close() }.keyboardShortcut(.defaultAction)
+                }
+            } else {
                 Label("You're all set", systemImage: "checkmark.circle.fill").font(.title2.weight(.semibold)).foregroundStyle(.green)
-                Text("Puck Bridge can see Claude, hear the puck and show the weather. macOS remembers this, also after updates.")
-                    .foregroundStyle(.secondary)
+                Text("Puck Bridge lives in the menu bar, top right (◎). Plug in the puck with its USB cable and your chats appear on it."
+                     + (model.signedAs != nil ? " macOS remembers these permissions, also after updates." : ""))
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Toggle("Start Puck Bridge when you log in", isOn: Binding(get: { model.loginStatus == .enabled }, set: { model.setLogin($0) }))
                 HStack { Spacer(); Button("Done") { close() }.keyboardShortcut(.defaultAction) }
             }
         }
         .padding(22)
         .frame(width: 460)
         .onChange(of: current == nil) { _, done in
-            if done { model.helper.hide(); DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { close() } }
+            if done { model.helper.hide() }   // the last page stays until Done: it has the login switch on it
         }
     }
 
@@ -4672,9 +5103,12 @@ struct SetupView: View {
         Text("Step \(n) of \(model.setupSteps.count)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
         switch step {
         case .accessibility:
-            Text("Let Puck Bridge see Claude").font(.title2.weight(.semibold))
-            Text("This is how it reads your chats, opens them and presses Stop. macOS only lets you switch it on yourself: click the button, then turn on Puck Bridge in the list. A small card beside System Settings shows where.")
+            Text(model.justUpdated ? "Puck Bridge was updated" : "Let Puck Bridge see Claude").font(.title2.weight(.semibold))
+            Text(model.justUpdated
+                 ? "macOS needs your OK again after an update of an unsigned app. If Puck Bridge already looks switched on in the list, use Reset and Allow Again."
+                 : "Puck Bridge needs Accessibility to read your Claude chats, open them and press Stop. Click the button, then switch Puck Bridge on in the list. A small card will show you where.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if model.justUpdated { HStack { Spacer(); Button("Reset and Allow Again") { model.resetPermissions() } } }
             HStack(spacing: 10) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 28, height: 28)
                 Text("Puck Bridge")
@@ -4686,18 +5120,18 @@ struct SetupView: View {
             buttons(step, primary: "Open System Settings") { model.startAccessibilityHelp() }
         case .speech:
             Text("Let the puck take your voice").font(.title2.weight(.semibold))
-            Text("What you say into the puck is turned into text on this Mac and typed into Claude. Click Allow when macOS asks.")
+            Text("What you say into the puck is turned into text (on this Mac when your language supports it) and typed into Claude. Click Allow when macOS asks.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            buttons(step, primary: model.speech == .notDetermined ? "Ask Me" : "Open System Settings") { model.fixSpeech() }
+            buttons(step, primary: model.speech == .notDetermined ? "Allow Speech Recognition…" : "Open System Settings") { model.fixSpeech() }
         case .location:
             Text("Weather on the puck's clock").font(.title2.weight(.semibold))
-            Text("Puck Bridge uses this Mac's rough location for the forecast (only a rounded position goes to Open-Meteo). Click Allow when macOS asks, or turn the weather off.")
+            Text("Show the weather on the puck's clock? Puck Bridge uses this Mac's rough location, only to get the forecast (a rounded position goes to Open-Meteo).")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Turn Weather Off") { model.setWeather(false); model.objectWillChange.send() }
                 Spacer()
                 Button("Skip") { model.skipped.insert(step) }
-                Button(model.weather.status == .notDetermined ? "Ask Me" : "Open System Settings") { model.allowLocation() }
+                Button(model.weather.status == .notDetermined ? "Allow Location…" : "Open System Settings") { model.allowLocation() }
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -4810,13 +5244,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // A permission missing (first run, a new Mac): walk through them, one at a time.
         model.showSetup = { [weak self] in self?.showSetup() }
-        if model.needsSetup { DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.showSetup() } }
+        let updated = model.justUpdated   // read once at launch: it records this version as the last run
+        if model.setupWanted || (updated && !model.axTrusted) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.showSetup() }
+        }
 
         bridge.weather = model.weather
         model.weather.onChange = { [weak self] in self?.model.weatherChanged() }
         model.weather.start()
 
         Thread.detachNewThread { [bridge] in bridge.run() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
+                                                          queue: .main) { [bridge] _ in bridge.perform { $0.woke() } }
 
         // The puck's "Match Mac" appearance follows the Mac's light/dark switch.
         DistributedNotificationCenter.default().addObserver(forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
@@ -4845,7 +5284,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(title)
         menu.addItem(add(s.puck, #selector(openGeneral)))
         menu.addItem(add(s.claude, s.claudeRunning ? #selector(openGeneral) : #selector(launchClaude)))
-        if model.needsSetup { menu.addItem(add(model.axTrusted ? "Finish Setting Up…" : "⚠︎ Allow Accessibility so Puck Bridge can see Claude…", #selector(allowAccessibility))) }
+        if !s.health.isEmpty && s.claudeRunning && model.axTrusted { menu.addItem(add("⚠︎ \(s.health)", #selector(openGeneral))) }
+        if s.stockFirmware { menu.addItem(add("⚠︎ Puck Bridge firmware was replaced: Reinstall…", #selector(reinstallFirmware))) }
+        if s.released { menu.addItem(add("Take the Puck Back", #selector(takeBackItem))) }
+        if model.needsSetup { menu.addItem(add(model.axTrusted ? "Finish Setting Up…" : model.justUpdated ? "⚠︎ After the update, allow Accessibility again…" : "⚠︎ Allow Accessibility so Puck Bridge can see Claude…", #selector(allowAccessibility))) }
         menu.addItem(.separator())
 
         if !s.chats.isEmpty {
@@ -4930,6 +5372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openGeneral() { showSettings(.general) }
     @objc func openCharacter() { showSettings(.character) }
     @objc func launchClaude() { model.openClaude() }
+    @objc func takeBackItem() { model.takeBack() }
+    @objc func reinstallFirmware() { showSettings(.puck); model.installFirmware() }
     @objc func allowAccessibility() { showSetup() }
 
     var setupWindow: NSWindow?
@@ -4943,7 +5387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             w.center()
             setupWindow = w
         }
-        model.skipped = []
+        if model.justUpdated && !model.axTrusted { model.skipped.remove(.accessibility) }
         NSApp.activate()
         setupWindow?.makeKeyAndOrderFront(nil)
     }

@@ -68,6 +68,8 @@ static void render_iteration(void)
     display_lock();
     habitat_tick();
     bool fresh = habitat_scene_take(&scenes[front ^ 1]);
+    // A scene holds HT_RUNS runs and drops what doesn't fit, silently on the device: a full one fails the test.
+    if (fresh && scenes[front ^ 1].count >= HT_RUNS) printf("FAIL scene full (%d runs): the rest of this screen was not drawn\n", scenes[front ^ 1].count);
     uint32_t receipt = habitat_scene_receipt();
     wake_ms = habitat_next_wake_ms();
     uint32_t idle_off_ms = habitat_idle_off_ms(300000);
