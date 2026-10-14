@@ -2300,7 +2300,7 @@ index 4b4f44f4..bcd7d690 100644
  void habitat_touch(bool down, int x, int y, uint32_t now_ms);
  // The driver calls this on an untrusted sample, then swallows contact until a real release.
 diff --git a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
-index f3c3fa2b..7f3c1d35 100644
+index f3c3fa2b..7cb27479 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 @@ -15,6 +15,7 @@
@@ -2426,7 +2426,19 @@ index f3c3fa2b..7f3c1d35 100644
  static const char *voice_status(void);
  static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
  static void copy(char *dst, size_t cap, const char *src)
-@@ -556,6 +633,7 @@ static void view(view_t v)
+@@ -297,7 +374,10 @@ static void copy(char *dst, size_t cap, const char *src)
+         return;
+     if (!src)
+         src = "";
+-    size_t n = strnlen(src, cap - 1);
++    // A loop, not strnlen(src, cap - 1): GCC 14 (-Werror=stringop-overread) rejects a bound longer than a short
++    // literal source once this is inlined (pb.4's "Puck Bridge" toast title, the voice timeout line).
++    size_t n = 0;
++    while (n + 1 < cap && src[n]) n++;
+     memmove(dst, src, n);
+     dst[n] = 0;
+ }
+@@ -556,6 +636,7 @@ static void view(view_t v)
      if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
      input_cancel();
      s.voice_retry_until = 0;
@@ -2434,7 +2446,7 @@ index f3c3fa2b..7f3c1d35 100644
      s.view = v;
      s.offset = 0;
      s.pressed = -1;
-@@ -602,7 +680,9 @@ static void tab_request(const char *id, bool browsing)
+@@ -602,7 +683,9 @@ static void tab_request(const char *id, bool browsing)
      if (!queue(a)) { workspace_failed("Device busy. Choose the tab again."); return; }
      ht_visit_close(&visit); s.pending_focus[0]=0;
      s.loading=true;
@@ -2445,7 +2457,7 @@ index f3c3fa2b..7f3c1d35 100644
          COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
          view(MESSAGE);
      }
-@@ -610,7 +690,8 @@ static void tab_request(const char *id, bool browsing)
+@@ -610,7 +693,8 @@ static void tab_request(const char *id, bool browsing)
  }
  static void tabs_sync(void)
  {
@@ -2455,7 +2467,7 @@ index f3c3fa2b..7f3c1d35 100644
      int index=ht_tab_carousel_index(&tab_carousel);
      if (index>=0 && index<s.tab_count) tab_request(s.tabs[index].id,true);
  }
-@@ -1002,6 +1083,11 @@ static void surface_tick(uint32_t now)
+@@ -1002,6 +1086,11 @@ static void surface_tick(uint32_t now)
      // The voice screen's listening scene runs while the finger is down (hold-to-talk); the pets do not.
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE) &&
          (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
@@ -2467,7 +2479,7 @@ index f3c3fa2b..7f3c1d35 100644
      bool main = s.view == HOME || s.view == AGENT;
      bool visible = !display_is_asleep() &&
          ((main && s.connected && !s.loading) || s.view == VOICE);
-@@ -1108,10 +1194,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
+@@ -1108,10 +1197,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
              HT_LV_BELL);
      ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, bell_y + (h - cf->height) / 2, cw, cf, ink, blue, text);
  }
@@ -2480,7 +2492,7 @@ index f3c3fa2b..7f3c1d35 100644
      if (!s.connected || s.loading) { render_brand(f); return; }
      if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
      agent_t *a = active();
-@@ -1142,7 +1230,9 @@ static void render_home(ht_scene_t *f)
+@@ -1142,7 +1233,9 @@ static void render_home(ht_scene_t *f)
       * name still — see ht_character_face_t.
       */
      bool rotating = home_caption_rotates() && character.id != HT_CHARACTER_FOCUS;
@@ -2491,7 +2503,7 @@ index f3c3fa2b..7f3c1d35 100644
      bool bell = !s.voice_retry_until && !carry.active && !carry.error[0] && !visit.available;
      unsigned unread = notice_unread(a ? a->id : NULL);
      bell = bell && unread > 0;
-@@ -1177,7 +1267,8 @@ static void render_home(ht_scene_t *f)
+@@ -1177,7 +1270,8 @@ static void render_home(ht_scene_t *f)
          .straight_title = s.straight_title,
          .footer_action = carry.active || carry.error[0] || visit.available,
          .ink = FG, .foreground = FG, .dim = DIM,
@@ -2501,7 +2513,7 @@ index f3c3fa2b..7f3c1d35 100644
      char carried[128];
      if (carry.active) {
          snprintf(carried,sizeof(carried),"%d line%s from %.70s",carry.rows,carry.rows==1?"":"s",carry.source);
-@@ -1193,6 +1284,12 @@ static void render_home(ht_scene_t *f)
+@@ -1193,6 +1287,12 @@ static void render_home(ht_scene_t *f)
      }
      ht_character_face(f, &character, &f_, ACCENT, recap);
      s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
@@ -2514,7 +2526,7 @@ index f3c3fa2b..7f3c1d35 100644
      // The working face says it with the pet's bell bubble; every other face keeps the pill at 400.
      ht_rect_t bubble = {0};
      bool told = bell && focus_face && ht_focus_alert_shown(&f_, recap, &bubble);
-@@ -1334,7 +1431,10 @@ static const char *pane_label(int i)
+@@ -1334,7 +1434,10 @@ static const char *pane_label(int i)
  static void render_focus_panes(ht_scene_t *f)
  {
      uint16_t fg = color(0xeaeaf0), pressed_fill = color(0x30333f);   // the Choose-a-tab pill's ink and press
@@ -2526,7 +2538,7 @@ index f3c3fa2b..7f3c1d35 100644
      if (!s.count) {
          /*
           * NO PANES (design 2026-10-06, focus-project.html "Panes, none"): "No panes in / this tab." on two Inter 44
-@@ -1364,6 +1464,13 @@ static void render_focus_panes(ht_scene_t *f)
+@@ -1364,6 +1467,13 @@ static void render_focus_panes(ht_scene_t *f)
      if (pane_carousel.count != s.count)
          ht_tab_carousel_reset(&pane_carousel, s.count, s.active >= 0 && s.active < s.count ? s.active : 0);
      focus_carousel(f, &pane_carousel, s.count, pane_label, A_AGENT);
@@ -2540,7 +2552,7 @@ index f3c3fa2b..7f3c1d35 100644
      ht_text(f, (HT_WIDTH - ht_done_28.width) / 2, 400, ht_done_28.width, &ht_done_28,
              s.connected ? color(HT_THEME_VOICE) : DIM, BG, HT_DONE);
      s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_AGENT, ht_tab_carousel_index(&pane_carousel), s.connected};
-@@ -1519,6 +1626,11 @@ static int settings_count(void)
+@@ -1519,6 +1629,11 @@ static int settings_count(void)
      while (settings_item(count, NULL)) count++;
      return count;
  }
@@ -2552,7 +2564,7 @@ index f3c3fa2b..7f3c1d35 100644
  static void tabs_move(int dy)
  {
      // Move by one name while the finger is down, rather than paging by three
-@@ -1527,7 +1639,8 @@ static void tabs_move(int dy)
+@@ -1527,7 +1642,8 @@ static void tabs_move(int dy)
      int step = s.tab_drag / TAB_ROW_HEIGHT;
      if (!step) return;
      s.tab_drag %= TAB_ROW_HEIGHT;
@@ -2562,7 +2574,7 @@ index f3c3fa2b..7f3c1d35 100644
      int last = count > TAB_ROWS ? count - TAB_ROWS : 0;
      int next = s.offset + step;
      if (next < 0) next = 0;
-@@ -1683,8 +1796,71 @@ static void render_focus_tabs(ht_scene_t *f)
+@@ -1683,8 +1799,71 @@ static void render_focus_tabs(ht_scene_t *f)
      }
      focus_carousel(f, &tab_carousel, s.tab_count, tab_label, A_TAB);
  }
@@ -2634,7 +2646,7 @@ index f3c3fa2b..7f3c1d35 100644
      // Done is shared by every face, with the same generous bottom-edge target; green on Focus (design 2026-10-06).
      ht_text(f, (HT_WIDTH-ht_done_28.width)/2, 400, ht_done_28.width, &ht_done_28,
              character.id == HT_CHARACTER_FOCUS ? color(HT_THEME_VOICE) : FG, BG, HT_DONE);
-@@ -2047,6 +2223,382 @@ static void render_draft_options(ht_scene_t *f)
+@@ -2047,6 +2226,382 @@ static void render_draft_options(ht_scene_t *f)
      control(f, FACE_CX(336), 323, 336, "Back to draft", A_DRAFT_BACK, 0, true);
      center(f, 380, draft.page.locked ? "Check terminal" : "Nothing sent yet", DIM);
  }
@@ -3017,7 +3029,7 @@ index f3c3fa2b..7f3c1d35 100644
  static void render_settings(ht_scene_t *f)
  {
      heading(f, "controls");
-@@ -2160,6 +2712,7 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2160,6 +2715,7 @@ bool habitat_scene_take(ht_scene_t *f)
          break;
      }
      case STOP:
@@ -3025,7 +3037,7 @@ index f3c3fa2b..7f3c1d35 100644
          heading(f, "stop this turn?");
          center(f, 185, "Your work stays.", FG);
          center(f, 227, "This turn stops.", DIM);
-@@ -2183,7 +2736,20 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2183,7 +2739,20 @@ bool habitat_scene_take(ht_scene_t *f)
      case OTA:
          render_brand(f);
          break;
@@ -3046,7 +3058,7 @@ index f3c3fa2b..7f3c1d35 100644
          heading(f, s.title);
          ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
          break;
-@@ -2415,6 +2981,10 @@ static void dispatch(action_t a)
+@@ -2415,6 +2984,10 @@ static void dispatch(action_t a)
          }
          break;
      case A_HOME:
@@ -3057,7 +3069,7 @@ index f3c3fa2b..7f3c1d35 100644
          if (workspace.phase!=HT_WORKSPACE_IDLE) {
              ht_workspace_cancel_request(&workspace); s.loading=false; s.active=-1;
          }
-@@ -2537,6 +3107,10 @@ static void dispatch(action_t a)
+@@ -2537,6 +3110,10 @@ static void dispatch(action_t a)
          view(MACHINES);
          break;
      case A_TAB:
@@ -3068,7 +3080,7 @@ index f3c3fa2b..7f3c1d35 100644
          if (s.view==TABS && workspace_index(a.id)>=0)
              ht_tab_carousel_reset(&tab_carousel,s.tab_count,workspace_index(a.id));
          tab_request(a.id,s.view==TABS);
-@@ -2738,7 +3312,7 @@ static void dispatch(action_t a)
+@@ -2738,7 +3315,7 @@ static void dispatch(action_t a)
          if (s.connected && find(s.stop_agent) >= 0 && s.agents[find(s.stop_agent)].busy) {
              COPY(a.id, s.stop_agent);
              queue(a);
@@ -3077,7 +3089,7 @@ index f3c3fa2b..7f3c1d35 100644
          }
          break;
      case A_MODELS:
-@@ -2779,6 +3353,57 @@ static void dispatch(action_t a)
+@@ -2779,6 +3356,57 @@ static void dispatch(action_t a)
          break;
      case A_SETTINGS_SAVE:
          break;   // the worker's alone: it is queued, never dispatched from a hit rect
@@ -3135,7 +3147,7 @@ index f3c3fa2b..7f3c1d35 100644
      case A_QUESTION_READ:
      case A_NOTICE_READ:
      case A_TAB_REFRESH:
-@@ -2890,6 +3515,21 @@ static void worker(void *unused)
+@@ -2890,6 +3518,21 @@ static void worker(void *unused)
          case A_STOP_YES:
              cable_client_stop_turn(a.id);
              break;
@@ -3157,7 +3169,7 @@ index f3c3fa2b..7f3c1d35 100644
          case A_MODEL: {
              const char *p = strrchr(a.text, ':');
              char model[128];
-@@ -2958,6 +3598,29 @@ static void worker(void *unused)
+@@ -2958,6 +3601,29 @@ static void worker(void *unused)
          }
      }
  }
@@ -3187,7 +3199,7 @@ index f3c3fa2b..7f3c1d35 100644
  void habitat_touch(bool down, int x, int y, uint32_t now)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -2969,6 +3632,57 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2969,6 +3635,57 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
  #endif
      if (!s.ready)
          return;
@@ -3245,7 +3257,7 @@ index f3c3fa2b..7f3c1d35 100644
      bool surface = s.view == HOME || s.view == AGENT;
      if (s.touch_down && !s.touch_cancelled) {
          // Classify this sample before the hold deadline. A delayed MOVE/UP
-@@ -2990,6 +3704,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2990,6 +3707,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          s.draft_drag = 0;
          s.tab_drag = 0;
          s.pressed = -1;
@@ -3253,7 +3265,7 @@ index f3c3fa2b..7f3c1d35 100644
          pressed_action = make_action((hit_t){.action = A_NONE});
          for (int i = 0; i < s.hit_count; i++) {
              hit_t h = s.hits[i];
-@@ -3002,7 +3717,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3002,7 +3720,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          }
          if (surface && pressed_action.kind==A_TABS && !s.touch_brake)
              ht_workspace_touch(&workspace,workspace_index(s.selected_tab),s.tab_count,x,y,now);
@@ -3262,7 +3274,7 @@ index f3c3fa2b..7f3c1d35 100644
          if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_AGENT)
              ht_tab_carousel_begin(&pane_carousel, x, now);
          if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_NOTICE)
-@@ -3026,7 +3741,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3026,7 +3744,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          ht_gesture_move(&gesture, x, y);
          if (surface && home_footer(pressed_action.kind)) {
              if (pressed_action.kind==A_TABS && ht_workspace_move(&workspace,x,y,gesture.axis,now)) change();
@@ -3271,7 +3283,7 @@ index f3c3fa2b..7f3c1d35 100644
              if (gesture.axis == 2 && ht_tab_carousel_move(&tab_carousel, x, now)) {
                  tabs_sync(); change();
              }
-@@ -3034,7 +3749,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3034,7 +3752,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
              if (gesture.axis == 2 && ht_tab_carousel_move(&pane_carousel, x, now)) change();
          } else if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && inbox_carousel.touching) {
              if (gesture.axis == 2 && ht_tab_carousel_move(&inbox_carousel, x, now)) change();
@@ -3280,7 +3292,7 @@ index f3c3fa2b..7f3c1d35 100644
              tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
          } else if (s.view == DRAFT && gesture.axis == 1) {
              draft_move((s.last_y - y) * (scroll_reversed ? -1 : 1), now);
-@@ -3060,7 +3775,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3060,7 +3778,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          bool notice_tap = notice_contact && ht_tab_carousel_end(&inbox_carousel, x, gesture.axis == 2, now);
          if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS) {
              // the pages own the contact (pane_contact, below)
@@ -3290,7 +3302,7 @@ index f3c3fa2b..7f3c1d35 100644
              tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
          bool tab_contact = s.view == TABS && tab_carousel.touching;
          bool tab_tap = tab_contact && ht_tab_carousel_end(&tab_carousel, x, gesture.axis == 2, now);
-@@ -3101,6 +3817,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3101,6 +3820,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
              change();
          } else if (result == HT_TOUCH_TAP && s.touch_brake) {
              // DOWN already stopped desktop inertia. This entire tap is only a brake.
@@ -3309,7 +3321,7 @@ index f3c3fa2b..7f3c1d35 100644
          } else if (surface && pressed_action.kind==A_TABS) {
              bool cancelled=workspace.cancelled || (workspace.touching && now-workspace.began>=5000);
              int chosen=ht_workspace_release(&workspace,x,y,gesture.axis,now);
-@@ -3178,7 +3906,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3178,7 +3909,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  dispatch(pressed_action);
              }
          } else if (gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx)) {
@@ -3318,7 +3330,7 @@ index f3c3fa2b..7f3c1d35 100644
                  // The list consumed the drag already, including its final sample.
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  // Reading a draft never submits or starts recording.
-@@ -3193,6 +3921,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3193,6 +3924,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
                  // is the gesture the rest of the world already means by it.
                  view(INBOX);
@@ -3330,7 +3342,7 @@ index f3c3fa2b..7f3c1d35 100644
              } else if (surface) {
                  // A congested scroll queue cannot turn a scroll into navigation or voice.
              } else if (s.start_y >= 400 && dy < 0)
-@@ -3213,8 +3946,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3213,8 +3949,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (next >= 0 && next < count) s.offset = next;
              }
          } else if (gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy)) {
@@ -3352,7 +3364,7 @@ index f3c3fa2b..7f3c1d35 100644
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  if (dx > 0) {
                      action_t a = make_action((hit_t){.action = s.view == DRAFT ? A_DRAFT_OPTIONS : A_DRAFT_BACK});
-@@ -3226,7 +3971,23 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3226,7 +3974,23 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (dx>0 && !s.q.pending) view(s.view==ANSWER_REVIEW ? CHOICE : s.view==CHOICE ? QUESTION : HOME);
              } else if (s.view == INBOX && s.notice_count)
                  s.offset = (s.offset + (dx < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
@@ -3377,7 +3389,7 @@ index f3c3fa2b..7f3c1d35 100644
                  int i = s.active < 0 ? 0 : (s.active + (dx < 0 ? 1 : s.count - 1)) % s.count;
                  action_t a = {.kind = A_AGENT};
                  COPY(a.id, s.agents[i].id);
-@@ -3276,6 +4037,21 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3276,6 +4040,21 @@ uint32_t habitat_next_wake_ms(void)
          uint32_t due = status_wake_ms(now);
          if (due < delay) delay = due;
      }
@@ -3399,7 +3411,7 @@ index f3c3fa2b..7f3c1d35 100644
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
          int32_t left = (int32_t)(s.pet_next_ms - now);
          uint32_t due = left < 1 ? 1 : (uint32_t)left;
-@@ -3300,6 +4076,141 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3300,6 +4079,141 @@ uint32_t habitat_next_wake_ms(void)
          }
      return delay;
  }
@@ -3541,7 +3553,7 @@ index f3c3fa2b..7f3c1d35 100644
  void habitat_tick(void)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -3314,6 +4225,9 @@ void habitat_tick(void)
+@@ -3314,6 +4228,9 @@ void habitat_tick(void)
          change();
      }
      surface_tick(now);
@@ -3551,7 +3563,7 @@ index f3c3fa2b..7f3c1d35 100644
      if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");
      if ((s.q.loading || (s.q.pending && !s.q.uncertain)) && (int32_t)(now-s.q.deadline)>=0) {
          if (s.q.loading) { s.q.loading=false; COPY(s.q.error,"Question did not arrive. Open the alert again."); }
-@@ -3375,7 +4289,10 @@ void habitat_tick(void)
+@@ -3375,7 +4292,10 @@ void habitat_tick(void)
              } else if (s.view == DRAFT) {
                  COPY(draft.page.error, "No voice reply. Checking your draft."); change();
              } else {
@@ -3563,7 +3575,7 @@ index f3c3fa2b..7f3c1d35 100644
              }
          }
      }
-@@ -3601,6 +4518,7 @@ void ui_set_connected(bool value)
+@@ -3601,6 +4521,7 @@ void ui_set_connected(bool value)
          if (question_view(s.view)) view(HOME);
          ht_visit_close(&visit);
          ht_carry_close(&carry);
@@ -3571,7 +3583,7 @@ index f3c3fa2b..7f3c1d35 100644
      }
      s.connected = value;
      if (!value && form.id[0]) { ht_form_reset(&form); view(HOME); }
-@@ -3644,6 +4562,16 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
+@@ -3644,6 +4565,16 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
      }
      display_unlock();
  }
@@ -3588,7 +3600,7 @@ index f3c3fa2b..7f3c1d35 100644
  void ui_project_fill_missing_engine(const char *engine)
  {
      display_lock();
-@@ -4007,8 +4935,11 @@ void ui_land_after_reload(void)
+@@ -4007,8 +4938,11 @@ void ui_land_after_reload(void)
      if (s.loading && (workspace.phase==HT_WORKSPACE_IDLE || workspace.phase==HT_WORKSPACE_READY)) {
          ht_workspace_cancel_request(&workspace);
          s.loading = false;
@@ -3601,7 +3613,7 @@ index f3c3fa2b..7f3c1d35 100644
      change();
      display_unlock();
  }
-@@ -4046,7 +4977,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
+@@ -4046,7 +4980,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
  bool ui_switch_is_open(void) { return s.view == TABS; }
  bool ui_scroll_reportable(void)
  {
@@ -3611,7 +3623,7 @@ index f3c3fa2b..7f3c1d35 100644
             !display_is_asleep() && !s.voice_open && !audio_client_active();
  }
  int ui_notif_pull_zone_px(void) { return 0; }
-@@ -4864,7 +5796,7 @@ void ui_cable_toast(const char *message)
+@@ -4864,7 +5799,7 @@ void ui_cable_toast(const char *message)
          return;
      }
      display_unlock();
@@ -3620,7 +3632,7 @@ index f3c3fa2b..7f3c1d35 100644
  }
  void ui_voice_error(const char *message)
  {
-@@ -5016,16 +5948,172 @@ void ui_stop_active_turn(void)
+@@ -5016,16 +5951,172 @@ void ui_stop_active_turn(void)
      }
      display_unlock();
  }
