@@ -13,8 +13,14 @@ every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.3` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 2`
-  (pb.1 sent 1; pb.3 changes behaviour only, not the protocol).
+- **Version** `0.0.88-pb.4` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 3`
+  (pb.1 sent 1, pb.2 and pb.3 sent 2).
+- **pb.4:** timers (below), sound previews in pickers, a tab switch screen of cards (one per tab: name, how many
+  chats or sessions, "· N working"; tap to switch, tap the current card or swipe sideways to go back), Code panes show
+  their project small under the name, tips that match side pages ("Tap to talk", "Hold for tabs", "Swipe up for all
+  chats", "Swipe right for the clock"; never "Choose a pane"), a "Puck Bridge" connecting screen, message and
+  stop screens with pills and the release rule (a tap anywhere closes a message), and the panes list headed with the
+  tab's name.
 - **Side pages** (once a Puck Bridge host has sent `ambient`, `pb.menu` or `pb.sound` on this connection; off again on
   disconnect): `Settings ← Clock → pane 1 → pane 2 → …`. On the face, swiping right from the first pane goes to the
   clock, and nothing wraps. On the clock, swipe left → the pane on the face (or the first), swipe right → Settings,
@@ -33,8 +39,10 @@ every push.
   **hold** (800 ms or more) opens the "stop this turn?" screen when the pane on the face is busy (on the clock: that
   pane, or the only pane working), and otherwise turns
   the screen on or off as before. A press still wakes a dark screen. Factory reset (BOOT held at power-on) is unchanged.
-- **A fresh connection starts on the clock** (pb.3): the first `ambient` chooses the first pane when none is chosen
-  (so the face never says "Choose a pane") and shows the clock, unless the face is in use.
+- **A fresh connection starts on the clock** (pb.3, made robust in pb.4): the first `ambient` chooses the first pane
+  when none is chosen and shows the clock unless the face is in use; a list that lands later keeps the clock up, and a
+  `focus` with `"keepClock": true` chooses the pane without leaving the clock. Every ordering of welcome, list,
+  focus, `pb.sound` and `ambient` ends on the clock (`firmware/sim/demo/startup_orders.sim`).
 - **Idle becomes the clock.** After `idleMin` minutes (default 5) with nothing going on, the agent face becomes the
   clock. "Nothing going on" means no touch, no voice, connected, and the face showing (not a list, question, draft,
   form, message, stop or update screen); a pane that is working doesn't hold it off (pb.3), since the ring shows it.
@@ -97,7 +105,27 @@ microphone is open. Send it after every `welcome`. The official `muted` setting 
 
 Puck → host:
 
-- `{"t":"pb.menu.open"}` when the Settings page opens. Answer it with `pb.menu`. The puck shows
+- `{"t":"pb.menu.open"}` when the Settings page opens.
+- `{"t":"pb.timer.state","seconds":S}` (pb 3) on every timer start, replace or cancel (0), once a minute while
+  running, and 0 at the end; `{"t":"pb.timer.done","reason":"stopped"|"timeout"}` when the ringing stops (a touch,
+  the small button, a hold; or 60 s of ringing).
+
+From pb 3, host → puck also:
+```
+{"t":"pb.timer","seconds":300,"label":"5 min timer"}
+```
+0–86400 s, 0 cancels, `label` ≤ 23 bytes. A new one replaces a running timer (and silences a ringing one without
+`pb.timer.done`). The puck counts down on its own clock (a sleeping Mac or a disconnect doesn't stop it). The clock
+shows "Timer 4:59" in orange in place of the weather; at zero the TIMER screen ("Time's up", the label, 0:00, the
+ring blinking, a Stop pill) wakes the panel and plays the current sound every 2 s (silent when `muted`, never while
+the microphone is open) for up to 60 s.
+
+`focus` may carry `"keepClock": true`; `agent` may carry `"project"` (≤ 39 bytes, shown small on Code panes).
+Picker choices may carry `"sound":"chime|soft|bell|digital"` and/or `"volume":0-100`: when the picker rests on one
+for ~300 ms it plays that sound once (even when muted; never while the microphone is open). Each such key costs 2
+tokens in the 512-token budget. A row whose choices are actions (the Timer row) sends no `index`.
+Host-initiated tab switch: `swarms` with the new `selected`, then that tab's `agents.begin` / `agent`… /
+`agents.end {tab}`, then `focus {agentId, keepClock:true}`. Answer it with `pb.menu`. The puck shows
   "Loading…" and gives up after 5 s ("No answer from the Mac.").
 - `{"t":"pb.menu.tap","id":"<id>"}` when a row without choices is tapped. Answer with an updated `pb.menu`.
 - `{"t":"pb.menu.set","id":"<id>","index":N,"value":"<choice value>"}` (pb 2) when a choice is made on a picker page.
@@ -118,7 +146,7 @@ Puck → host:
 ## Restoring official firmware
 
 - Let OpenHarness connect (Puck Bridge → Settings → Advanced → Lend the Puck to OpenHarness…). Its daemon updates the
-  puck to the official firmware, because `0.0.88-pb.3` is not the published version.
+  puck to the official firmware, because `0.0.88-pb.4` is not the published version.
 - Or flash the official image with the repo's `flash-circle.sh --version <x.y.z>`, or write back a full-flash backup
   with `esptool write_flash 0 backup.bin`.
 - If the firmware will not boot, hold BOOT while plugging in to enter ROM download mode, then flash.

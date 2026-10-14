@@ -1,0 +1,7 @@
+# The Mac's answer once the Claude Code tab is selected: its sessions (named by title, the project beside it), and the
+# focus it sends after every list (keepClock: choose the pane, keep the clock if it is up).
+in {"t":"agents.begin"}
+in {"t":"agent","id":"cc-1","name":"Fix the login bug","project":"puckbridge","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"cc-2","name":"Write the release notes","project":"openharness","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":2,"tab":"code"}
+in {"t":"focus","agentId":"cc-1","keepClock":true}

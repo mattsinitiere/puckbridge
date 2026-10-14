@@ -1,0 +1,24 @@
+# pb 3: a Puck Bridge face's tips are its own gestures (never "Tap the name to switch panes", never "Choose a pane").
+log 2
+autoping 1
+include demo/lib/welcome.sim
+in {"t":"agents.begin"}
+in {"t":"agent","id":"c1","name":"Trip planning","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c2","name":"Swift refactor","engine":"cursor","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c3","name":"Grocery list","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":3,"tab":"chats"}
+in {"t":"focus","agentId":"c1","keepClock":true}
+include demo/lib/pbhost.sim
+tap 233 233
+shot out/renders/tips_1.png
+swipe 330 233 120 233 200
+shot out/renders/tips_2_resting.png
+swipe 330 233 120 233 200
+shot out/renders/tips_3.png
+swipe 120 233 330 233 200
+swipe 120 233 330 233 200
+shot out/renders/tips_4.png
+swipe 330 233 120 233 200
+shot out/renders/tips_5_resting.png
+swipe 120 233 330 233 200
+shot out/renders/tips_6.png

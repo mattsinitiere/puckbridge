@@ -1,0 +1,36 @@
+# pb 3: the Mac switches the tab itself (Claude Desktop moved between Chat and Code): `swarms` with the new
+# `selected`, then that tab's list ending agents.end {tab}, then focus keepClock. No reply is needed; no error
+# screen, no loading; the clock stays up if it is up, and the face follows if it is on.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+time +300
+expect view CLOCK
+echo --- on the clock
+mark
+include demo/lib/swarms_code.sim
+include demo/lib/code_list.sim
+time +9000
+expect view CLOCK
+expect noout swarm.select
+expect noout agents.refresh
+state
+shot out/renders/clock_after_host_switch.png
+echo --- on the face: it shows the new tab's pane
+tap 233 233
+expect view HOME
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+time +9000
+expect view HOME
+state
+echo --- on the tab cards: they follow
+tap 233 233 800
+expect view TABS
+include demo/lib/swarms_code.sim
+include demo/lib/code_list.sim
+time +300
+shot out/renders/tabs_after_host_switch.png
+expect view TABS

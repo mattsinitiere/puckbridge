@@ -1976,7 +1976,7 @@ final class Bridge {
             let left = timerLeft
             var timer = MenuRow(id: "timer", label: "Timer", value: left.map { String(format: "%d:%02d left", $0 / 60, $0 % 60) } ?? "Off")
             timer.choices = Bridge.timerMinutes.map { MenuChoice(minutesName($0)) } + (left != nil ? [MenuChoice("Cancel timer")] : [])
-            timer.index = left != nil ? Bridge.timerMinutes.count : (Bridge.timerMinutes.firstIndex(of: Pref.timerLast) ?? 2)
+            timer.index = -1   // no `index`: a duration isn't a current value (the puck would mark it green)
             rows.append(timer)
         }
         rows.append(character)
@@ -2015,7 +2015,7 @@ final class Bridge {
         send(["t": "pb.menu", "title": "Settings", "items": menuRows.map { r -> [String: Any] in
             var m: [String: Any] = ["id": r.id, "label": r.label, "value": String(r.value.prefix(23))]
             if pickers && !r.choices.isEmpty {
-                m["index"] = r.index
+                if r.index >= 0 { m["index"] = r.index }
                 m["choices"] = r.choices.map { c -> [String: Any] in
                     var o: [String: Any] = ["value": String(c.value.prefix(23))]
                     if let p = c.pet { o["pet"] = p; if c.builtin { o["builtin"] = true } }

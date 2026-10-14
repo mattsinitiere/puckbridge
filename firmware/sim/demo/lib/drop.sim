@@ -1,0 +1,4 @@
+# The Mac goes quiet: 15 s of silence ends the session (cable_client.c session_tick), as a sleep or a quit does.
+autoping 0
+time +16000
+autoping 1

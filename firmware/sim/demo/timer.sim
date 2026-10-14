@@ -1,0 +1,82 @@
+# pb 3: a timer chosen on the puck (Timer row -> picker -> pb.menu.set; the Mac answers pb.timer), counted down on
+# the puck (pb.timer.state on start, every minute, at zero), its line on the clock, the alarm at zero (the sound
+# every 2 s, the panel woken), stopped by a touch or the small button (pb.timer.done "stopped") or ringing out
+# after a minute ("timeout"); a cable that goes keeps it running; 0 cancels.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+time +300
+echo --- the Timer row: a picker of durations
+swipe 120 233 330 233 200
+include demo/lib/menu3.sim
+shot out/renders/settings_list_timer_row.png
+tap 233 208 120
+expect view PICKER
+swipe 330 200 120 200 200
+swipe 330 200 120 200 200
+shot out/renders/picker_timer_5min.png
+mark
+tap 233 380 120
+expect out {"t":"pb.menu.set","id":"timer","index":2,"value":"5 min"}
+echo --- the Mac answers: the timer, and the menu again
+mark
+in {"t":"pb.timer","seconds":300,"label":"Timer"}
+expect out {"t":"pb.timer.state","seconds":300}
+include demo/lib/menu3_timer.sim
+shot out/renders/settings_list_timer_running.png
+boot tap
+expect view CLOCK
+time +1200
+shot out/renders/clock_timer_running.png
+echo --- a minute on: the state again; the cable goes and comes back: still running
+mark
+time +60000
+expect out {"t":"pb.timer.state","seconds":240}
+include demo/lib/drop.sim
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+time +300
+expect view CLOCK
+shot out/renders/clock_timer_after_reconnect.png
+echo --- at zero: the alarm, with the panel switched off first
+pwr
+mark
+time +230000
+expect out {"t":"pb.timer.state","seconds":0}
+expect view TIMER
+state
+shot out/renders/timer_done.png
+time +1000
+shot out/renders/timer_done_blink.png
+echo --- a touch stops it and reports it
+mark
+tap 233 233
+expect out {"t":"pb.timer.done","reason":"stopped"}
+expect view CLOCK
+echo --- the next one rings out after a minute
+in {"t":"pb.timer","seconds":2,"label":"Tea"}
+time +3000
+expect view TIMER
+mark
+time +61000
+expect out {"t":"pb.timer.done","reason":"timeout"}
+expect view CLOCK
+echo --- the small button stops one too
+in {"t":"pb.timer","seconds":1}
+time +2000
+expect view TIMER
+mark
+boot tap
+expect out {"t":"pb.timer.done","reason":"stopped"}
+expect view CLOCK
+echo --- 0 cancels a running timer: no alarm
+in {"t":"pb.timer","seconds":5,"label":"Tea"}
+mark
+in {"t":"pb.timer","seconds":0}
+expect out {"t":"pb.timer.state","seconds":0}
+time +7000
+expect view CLOCK
+expect noout pb.timer.done

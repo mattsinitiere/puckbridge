@@ -1,0 +1,45 @@
+# pb 3: hold the face for the tab switch (Chats / Claude Code cards); a card switches with the usual handshake
+# (swarm.select -> swarms -> agents.refresh -> agents.end {tab}); a swipe or the card on the face goes back unchanged.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+tap 233 233
+expect view HOME
+echo --- hold: the cards
+tap 233 233 800
+expect view TABS
+shot out/renders/tabs_cards_chats.png hits
+echo --- a sideways swipe goes back to the face without switching
+mark
+swipe 330 233 120 233 200
+expect view HOME
+expect noout swarm.select
+echo --- the card on the face goes back too
+tap 233 233 800
+mark
+tap 233 180 120
+expect view HOME
+expect noout swarm.select
+echo --- the Claude Code card: swarm.select, "Opening…" on its card, then the Code tab's face
+tap 233 233 800
+mark
+tap 233 300 120
+expect out {"t":"swarm.select","swarmId":"code"}
+expect view TABS
+shot out/renders/tabs_cards_opening.png
+include demo/lib/swarms_code.sim
+expect out {"t":"agents.refresh"}
+include demo/lib/code_list.sim
+time +300
+expect view HOME
+state
+shot out/renders/face_code_pane.png
+echo --- the cards again: Claude Code current, Chats still showing its working chat
+tap 233 233 800
+expect view TABS
+shot out/renders/tabs_cards_code.png
+boot tap
+expect view CLOCK

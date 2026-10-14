@@ -1,0 +1,33 @@
+# pb 3: a picker plays a choice's "sound" (and/or "volume") once it rests on it ~300 ms, even when muted, never
+# while the finger is still moving; choices without one stay silent.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+swipe 120 233 330 233 200
+include demo/lib/menu3.sim
+echo --- the Sound picker opens silent on Chime; a page to Soft plays soft, then Bell
+tap 233 272 120
+expect view PICKER
+shot out/renders/picker_sound.png
+time +500
+swipe 330 200 120 200 200
+time +400
+swipe 330 200 120 200 200
+time +400
+echo --- two quick pages: only the one it rests on plays
+swipe 120 200 330 200 120
+time +100
+swipe 120 200 330 200 120
+time +400
+echo --- Off has no sound: silent
+swipe 120 200 330 200 120
+time +400
+echo --- the Volume picker previews the chosen sound at each volume
+tap 100 70 100
+tap 233 336 120
+expect view PICKER
+swipe 330 200 120 200 200
+time +400
+shot out/renders/picker_volume.png
