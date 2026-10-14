@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+
+## [0.8.4] - 2026-10-14
 A full UX review of the puck and the Mac app (four reviews: puck visuals, puck flows, the Mac app, day-to-day use) and the fixes. Puck Bridge firmware **0.0.88-pb.9**.
 ### Fixed
 - **Timers and alarms ring even when the finish chime is off.** A fresh puck ships with it off, so alarms rang silently.
