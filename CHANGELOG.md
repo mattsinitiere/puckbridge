@@ -9,6 +9,7 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 ## [0.8.2] - 2026-10-14
 ### Added
 - **Puck Bridge firmware 0.0.88-pb.4** (all of the puck changes below; install it from Settings → Puck → Firmware).
+- `scripts/test-firmware.sh` also compiles the firmware with GCC 14 and ESP-IDF's warnings-as-errors flags when GCC 14 is installed, so compile errors only the firmware build saw show up in seconds.
 - **Timers** (Puck Bridge firmware pb.4): Settings → Timer on the puck (1 min to 1 hour, or cancel), or the Timer buttons in Settings → Puck on the Mac. The puck counts down by itself, shows it on the clock, and rings at the end until you touch it.
 - **Hear the sounds before choosing them:** on the puck's Sound and Volume pickers, each choice plays when you stop on it.
 ### Changed
