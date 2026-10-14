@@ -33,6 +33,8 @@ every push.
   **hold** (800 ms or more) opens the "stop this turn?" screen when the pane on the face is busy (on the clock: that
   pane, or the only pane working), and otherwise turns
   the screen on or off as before. A press still wakes a dark screen. Factory reset (BOOT held at power-on) is unchanged.
+- **A fresh connection starts on the clock** (pb.3): the first `ambient` chooses the first pane when none is chosen
+  (so the face never says "Choose a pane") and shows the clock, unless the face is in use.
 - **Idle becomes the clock.** After `idleMin` minutes (default 5) with nothing going on, the agent face becomes the
   clock. "Nothing going on" means no touch, no voice, connected, and the face showing (not a list, question, draft,
   form, message, stop or update screen); a pane that is working doesn't hold it off (pb.3), since the ring shows it.

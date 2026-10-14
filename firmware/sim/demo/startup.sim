@@ -1,0 +1,20 @@
+# A fresh connection never shows "Choose a pane" (owner, 2026-10-14): the first ambient selects pane 1 and shows
+# the clock; a tap on the clock lands on pane 1's face. Puck Bridge also sends `focus` after the first list.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+# The list with no `focus` (what Puck Bridge 0.8.0 and older sent): nothing is chosen.
+in {"t":"agents.begin"}
+in {"t":"agent","id":"c1","name":"Trip planning","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c2","name":"Swift refactor","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":2,"tab":"chats"}
+in {"t":"notif.replace","items":[]}
+include demo/lib/pbhost.sim
+time +200
+expect view CLOCK
+shot out/startup_clock.png
+tap 233 233
+time +200
+expect view HOME
+state
+shot out/startup_face.png

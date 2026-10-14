@@ -1372,6 +1372,7 @@ final class Bridge {
     var codeRows: [Chat] = Bridge.loadCodeRows()
     var codeStatuses: Set<String> = []   // the Code status words seen so far (logged once each, to learn them)
     var pendingOpen: (id: String, title: String, at: Date, why: String)?
+    var focusAfterList = false   // tell the puck which pane is on its face after the next list (connect, tab switch)
     var tabs: [PuckTab] = []
     var pushedTabsKey = ""
     var tabSwitchedAt = Date.distantPast
@@ -1580,6 +1581,14 @@ final class Bridge {
                   "machineId": MACHINE_ID, "machine": MACHINE_NAME])
         }
         send(["t": "agents.end", "total": tab.items.count, "tab": tab.id])
+        // A fresh connection or a new tab has no pane chosen: the puck would show "Choose a pane". Choose one:
+        // the chat last opened, else the one open in Claude, else the first.
+        if focusAfterList, !tab.items.isEmpty {
+            focusAfterList = false
+            let open = openChatId(view)
+            let pick = tab.items.first { $0.id == lastOpenedId } ?? tab.items.first { $0.id == open } ?? tab.items[0]
+            send(["t": "focus", "agentId": pick.id])
+        }
         // How-to text on each settings tile; `restore` = history, so no beep and nothing in the drawer.
         for t in tab.items.compactMap({ $0.tile }) {
             send(["t": "summary", "agentId": t.id, "name": fit(tileName(t)), "engine": eng, "machine": MACHINE_NAME,
@@ -1594,6 +1603,7 @@ final class Bridge {
         if id != Pref.tab { say("Puck → tab \"\(tab.name)\"") }
         Pref.tab = id
         tabSwitchedAt = Date()
+        focusAfterList = true
         pushTabs(force: true)   // the puck then asks for the tab's rows (agents.refresh)
     }
 
@@ -1630,6 +1640,7 @@ final class Bridge {
             if !greeted {
                 greeted = true
                 sessionStart = Date()
+                focusAfterList = true
                 say("Puck connected (firmware \(fw)\(petMax >= 1 ? ", custom characters supported" : ""))")
                 if claudeReadOnce || !axTrusted { tabs = buildTabs(); pushTabs(force: true); pushChats(force: true) }
                 send(["t": "notif.replace", "items": [Any]()])

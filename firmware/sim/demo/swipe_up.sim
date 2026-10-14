@@ -5,6 +5,10 @@ include demo/lib/welcome.sim
 include demo/lib/chats3.sim
 include demo/lib/pbhost.sim
 time +200
+echo --- a fresh connection starts on the clock; a tap goes to pane 1
+expect view CLOCK
+tap 233 233
+time +200
 mark
 swipe 233 330 233 120 200
 expect view AGENTS

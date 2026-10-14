@@ -2131,7 +2131,7 @@ index 4b4f44f4..bcd7d690 100644
  void habitat_touch(bool down, int x, int y, uint32_t now_ms);
  // The driver calls this on an untrusted sample, then swallows contact until a real release.
 diff --git a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
-index f3c3fa2b..28ecf04d 100644
+index f3c3fa2b..ac5b18a3 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 @@ -15,6 +15,7 @@
@@ -2870,7 +2870,7 @@ index f3c3fa2b..28ecf04d 100644
             !display_is_asleep() && !s.voice_open && !audio_client_active();
  }
  int ui_notif_pull_zone_px(void) { return 0; }
-@@ -5016,16 +5554,130 @@ void ui_stop_active_turn(void)
+@@ -5016,16 +5554,144 @@ void ui_stop_active_turn(void)
      }
      display_unlock();
  }
@@ -2938,8 +2938,22 @@ index f3c3fa2b..28ecf04d 100644
 +    PB_COPY(pb.cond, cond);
 +    PB_COPY(pb.hilo, hilo);
 +    if (idle_min >= 0) pb.idle_min = idle_min;
++    bool first = !pb.seen;
 +    pb.seen = true;
 +    pb.shift++;
++    /*
++     * A FRESH CONNECTION STARTS ON THE CLOCK (pb.3; owner, 2026-10-14: the face it woke on said "Choose a pane" —
++     * nothing was chosen — and a tip, which he did not want to see). The first `ambient` of a connection makes the
++     * first pane the face's, so leaving the clock lands on a real chat, and shows the clock, the Puck Bridge home —
++     * unless someone is already using the face (a finger down, voice, a list, a question).
++     */
++    if (first) {
++        if (s.active < 0 && s.count > 0) s.active = 0;
++        if ((s.view == HOME || s.view == AGENT) && !s.touch_down && !s.voice_open && !audio_client_active()) {
++            ESP_LOGI("habitat", "connected: clock");
++            view(CLOCK);
++        }
++    }
 +    if (s.view == CLOCK) change();
 +    display_unlock();
 +}
