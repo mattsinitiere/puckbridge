@@ -1,0 +1,25 @@
+# Owner's pick G2: a turn that starts leaves the clock up (its ring segment turns orange), idle brings the clock
+# up while a pane works, a held small button on the clock stops the working pane, and the finished turn's
+# summary still rings and takes the face back.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+expect view CLOCK
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+time +200
+expect view CLOCK
+shot out/clock_stays_busy.png
+boot hold
+expect view STOP
+boot tap
+expect view CLOCK
+in {"t":"summary","agentId":"c2","name":"Swift refactor","engine":"claude","machine":"Mac Studio","recap":"Done.","text":"Done."}
+time +200
+expect view HOME
+# Idle with a pane working still becomes the clock.
+in {"t":"turn.started","agentId":"c1","text":"Writing…"}
+time +301000
+expect view CLOCK

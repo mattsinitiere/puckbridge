@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+### Changed
+- **Puck Bridge firmware 0.0.88-pb.3:** when Claude starts working while the clock is up, the clock stays and that chat's segment in the ring turns orange (it used to jump to the chat). The finished reply still beeps and shows its card. The idle clock now also comes up while Claude works, and holding the small button on the clock stops the chat that's working.
 
 ## [0.8.0] - 2026-10-14
 ### Added

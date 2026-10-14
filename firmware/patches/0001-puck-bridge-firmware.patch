@@ -329,7 +329,7 @@ index 4fa9182e..0c358afb 100644
 +// Play the chosen sound once now, muted or not (never while the microphone is open). Non-blocking.
 +void audio_notify_preview(void);
 diff --git a/devices/harness-device/firmware/main/cable_client.c b/devices/harness-device/firmware/main/cable_client.c
-index a2aadaa1..73bc0fc7 100644
+index a2aadaa1..d93f8809 100644
 --- a/devices/harness-device/firmware/main/cable_client.c
 +++ b/devices/harness-device/firmware/main/cable_client.c
 @@ -12,6 +12,7 @@
@@ -462,19 +462,16 @@ index a2aadaa1..73bc0fc7 100644
          return;
      }
      // One line per turn-state message. This is the seam where "the daemon sent it" and "the tile moved"
-@@ -1277,7 +1361,11 @@ static void handle_message(const cJSON *root)
+@@ -1277,6 +1361,8 @@ static void handle_message(const cJSON *root)
          // is waiting on. Dropping it left the tile holding a live turn with nothing on screen that said so,
          // which reads exactly like the turn never started.
          const char *text = str_of(p, "text");
-+        // A turn that STARTS takes the face back from the clock. The host repeats turn.started every few
-+        // seconds while it runs; only the first, the one that made the tile busy, does.
-+        bool was_busy = agent_id && ui_project_is_busy(agent_id);
++        // A turn that starts LEAVES THE CLOCK UP (Puck Bridge pb.2, owner's pick G2): its segment in the clock's
++        // ring turns orange instead. The finished turn's summary still rings and takes the face back (below).
          if (agent_id) ui_project_emit(agent_id, "", "processing", text ? text : "", NULL);
-+        if (agent_id && !was_busy && ui_project_is_busy(agent_id)) ui_clock_leave();
          return;
      }
-     if (strcmp(t, "turn.activity") == 0) {
-@@ -1320,6 +1408,7 @@ static void handle_message(const cJSON *root)
+@@ -1320,6 +1406,7 @@ static void handle_message(const cJSON *root)
          // it: they are reading the last one, not watching for the next to end, and three tones is how
          // they learn a task is done without moving their eyes.
          audio_notify_done();
@@ -2134,7 +2131,7 @@ index 4b4f44f4..bcd7d690 100644
  void habitat_touch(bool down, int x, int y, uint32_t now_ms);
  // The driver calls this on an untrusted sample, then swallows contact until a real release.
 diff --git a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
-index f3c3fa2b..121fb7b7 100644
+index f3c3fa2b..28ecf04d 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 @@ -15,6 +15,7 @@
@@ -2788,15 +2785,16 @@ index f3c3fa2b..121fb7b7 100644
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
          int32_t left = (int32_t)(s.pet_next_ms - now);
          uint32_t due = left < 1 ? 1 : (uint32_t)left;
-@@ -3300,6 +3783,57 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3300,6 +3783,58 @@ uint32_t habitat_next_wake_ms(void)
          }
      return delay;
  }
 +/*
 + * IDLE BECOMES THE CLOCK (Puck Bridge). Once an `ambient` has come on this connection, `idle_min` minutes of
 + * rest turn the agent face into the clock. Rest is all of these at once, timed from the last moment any of
-+ * them failed: no finger and no touch, no pane working, no voice, connected and loaded, and the face itself
++ * them failed: no finger and no touch, no voice, connected and loaded, and the face itself
 + * on the glass — never a list mid-swipe, a question, a draft, a form, a message, a stop or an update screen.
++ * A pane that is working does not hold the clock off (pb.2, owner's pick G2): the ring shows it working.
 + */
 +static void pb_tick(uint32_t now)
 +{
@@ -2805,7 +2803,7 @@ index f3c3fa2b..121fb7b7 100644
 +        change();
 +    }
 +    bool resting = pb.seen && pb.idle_min > 0 && (s.view == HOME || s.view == AGENT) && s.connected &&
-+        !s.loading && !s.touch_down && !working() && !s.voice_open && !audio_client_active() &&
++        !s.loading && !s.touch_down && !s.voice_open && !audio_client_active() &&
 +        workspace.phase == HT_WORKSPACE_IDLE && !visit.pending && !selection.active && !carry.pending &&
 +        !form.id[0] && !draft.page.active;
 +    if (!resting) {
@@ -2846,7 +2844,7 @@ index f3c3fa2b..121fb7b7 100644
  void habitat_tick(void)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -3314,6 +3848,7 @@ void habitat_tick(void)
+@@ -3314,6 +3849,7 @@ void habitat_tick(void)
          change();
      }
      surface_tick(now);
@@ -2854,7 +2852,7 @@ index f3c3fa2b..121fb7b7 100644
      if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");
      if ((s.q.loading || (s.q.pending && !s.q.uncertain)) && (int32_t)(now-s.q.deadline)>=0) {
          if (s.q.loading) { s.q.loading=false; COPY(s.q.error,"Question did not arrive. Open the alert again."); }
-@@ -3601,6 +4136,7 @@ void ui_set_connected(bool value)
+@@ -3601,6 +4137,7 @@ void ui_set_connected(bool value)
          if (question_view(s.view)) view(HOME);
          ht_visit_close(&visit);
          ht_carry_close(&carry);
@@ -2862,7 +2860,7 @@ index f3c3fa2b..121fb7b7 100644
      }
      s.connected = value;
      if (!value && form.id[0]) { ht_form_reset(&form); view(HOME); }
-@@ -4046,7 +4582,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
+@@ -4046,7 +4583,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
  bool ui_switch_is_open(void) { return s.view == TABS; }
  bool ui_scroll_reportable(void)
  {
@@ -2872,7 +2870,7 @@ index f3c3fa2b..121fb7b7 100644
             !display_is_asleep() && !s.voice_open && !audio_client_active();
  }
  int ui_notif_pull_zone_px(void) { return 0; }
-@@ -5016,16 +5553,122 @@ void ui_stop_active_turn(void)
+@@ -5016,16 +5554,130 @@ void ui_stop_active_turn(void)
      }
      display_unlock();
  }
@@ -2899,7 +2897,15 @@ index f3c3fa2b..121fb7b7 100644
 +{
 +    display_lock();
 +    agent_t *a = active();
-+    bool stop = (s.view == AGENT || s.view == HOME) && a && a->busy;
++    if (s.view == CLOCK && (!a || !a->busy)) {
++        // On the clock the face's pane may not be the one working: with exactly one pane working, that one.
++        agent_t *only = NULL;
++        int busy = 0;
++        for (int i = 0; i < s.count; i++)
++            if (s.agents[i].busy) { only = &s.agents[i]; busy++; }
++        a = busy == 1 ? only : a;
++    }
++    bool stop = (s.view == AGENT || s.view == HOME || s.view == CLOCK) && a && a->busy;
 +    if (stop) {
 +        COPY(s.stop_agent, a->id);
          view(STOP);
@@ -3378,9 +3384,9 @@ index 331dda28..c279a2f4 100644
  harness += function('question_view') + function('copy') + function('input_cancel') + function('view') + function('voice_close') + function('workspace_failed')
  dispatch = source.split('case A_VOICE:\n', 1)[1].split('case A_PET:', 1)[0]
 diff --git a/devices/harness-device/firmware/version.txt b/devices/harness-device/firmware/version.txt
-index 0222dbeb..3c54581e 100644
+index 0222dbeb..dab6574b 100644
 --- a/devices/harness-device/firmware/version.txt
 +++ b/devices/harness-device/firmware/version.txt
 @@ -1 +1 @@
 -0.0.86
-+0.0.88-pb.2
++0.0.88-pb.3
