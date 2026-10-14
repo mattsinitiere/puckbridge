@@ -13,8 +13,18 @@ every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.5` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 4`
-  (pb.1 sent 1, pb.2 and pb.3 sent 2, pb.4 sent 3).
+- **Version** `0.0.88-pb.6` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 5`
+  (pb.1 sent 1, pb.2 and pb.3 sent 2, pb.4 sent 3, pb.5 sent 4).
+- **pb.6:** with any of the new list styles, **clock-home navigation**: from the clock, down = the notifications (up
+  goes back), up = the settings (down at the top goes back), left = the **Claude Code groups** (a page of the host's
+  `code*` tabs; browsing switches nothing), left again = the chats; a tapped group (or the chats) is switched to with
+  the tab handshake and opens on its **list** (not the face); a tapped row opens its face; right goes back everywhere
+  (face → list → groups → clock). Every list scrolls up and down (the dial too). Agents may carry `status` (≤ 23
+  bytes, e.g. "PR #9 merged") and `tone` (`merged` purple, `open` green, `closed` red, `draft`/`idle` grey), shown on
+  rows that aren't working or unread. **Settings as cards** (name left, value right with "›", On/Off rows as
+  switches; "Swipe down to close"). **Light theme** (`pb.ui {theme:"light"}`): every colour goes through `ht_rgb`,
+  which flips greys and darkens colours for a white ground (the pets keep theirs). Up to **12** settings rows. The
+  boot wordmark says "Puck Bridge". Classic keeps pb.4's side pages and pages.
 - **pb.5:** list styles for the panes list and the tabs (`pb.ui`, below): **cards** (a column of cards, scrolled up
   and down, the middle one large with a green rim), **dial** (the clock's ring with a segment per row, the chosen one
   long, its name large in the middle; turned sideways), **compact** (five rows under a fixed green band, scrolled up
@@ -131,6 +141,7 @@ From pb 4 (firmware pb.5), host → puck also:
 {"t":"pb.ui","lists":"cards"}
 ```
 `lists` is `cards`, `dial`, `compact` or `classic` (anything else is classic, and so is a puck that never got one).
+From pb 5 (firmware pb.6) `pb.ui` may also carry `"theme":"dark"|"light"` (absent: unchanged; the puck starts dark).
 In RAM: send it after every `welcome`. `swarms` items may carry `"working":N` (the tab's working chats); a tab that
 isn't on the face shows it. New counts with the same ids and names don't disturb a swipe, so the host re-sends
 `swarms` when they change.

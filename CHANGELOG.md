@@ -6,10 +6,18 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 ### Added
-- **List styles for the puck's chat and tab lists** (Puck Bridge firmware 0.0.88-pb.5): **Cards**, **Dial**, **Compact list** or **Classic** (the original green pages). Choose in Settings → Puck → "Chat and tab lists", or on the puck: Settings → Lists. Every row shows what it's doing (orange "Working · 1:23", "Reply ready", "Idle"; tabs: "3 sessions · 1 working"). In the new styles, swiping only browses; tap a row to open it, or a tab to switch to it.
+- **New puck navigation** (Puck Bridge firmware 0.0.88-pb.6, with the Cards, Dial or Compact list style): the clock is home; swipe down for notifications, up for settings, left for your **Claude Code groups**, left again for your chats; right goes back. Tap a group to see its sessions; tap a session to open it on the puck.
+- **Session status on the puck:** Claude Code rows show their pull request as Claude's sidebar does (**PR #9 merged** purple, **PR #12 open** green, **closed** red), or orange **Working · 1:23**, or **Reply ready**.
+- **Light mode** for the whole puck: Settings → Puck → **Appearance** (Dark, Light, Match Mac), or Settings → Appearance on the puck.
+- **Redesigned puck Settings:** rounded cards with the value on the right and real on/off switches; swipe down to close.
+- README: screenshots of every puck screen in dark and light (`docs/screenshots/`, made by `firmware/sim/tools/readme_shots.py`).
+- `firmware/sim/demo/nav.sim` and `nav_light.sim`: the whole navigation, in both themes.
+- **List styles for the puck's chat and tab lists** (Puck Bridge firmware 0.0.88-pb.5 and later): **Cards**, **Dial**, **Compact list** or **Classic** (the original green pages and side pages). Choose in Settings → Puck → "Chat and tab lists", or on the puck: Settings → Lists. Every row shows what it's doing (orange "Working · 1:23", "Reply ready", "Idle"; tabs: "3 sessions · 1 working"). In the new styles, swiping only browses; tap a row to open it, or a tab to switch to it.
 - `firmware/sim/demo/lists_{cards,dial,compact}.sim`: each style on the chat list and five tabs (browsing sends nothing, a tap opens or switches).
 - `firmware/sim/demo/project_tabs.sim`: five tabs (Chats + four projects) on Puck Bridge firmware use the carousel, a browsed project is selected with the tab handshake and ✓ lands on its session.
 ### Changed
+- **Claude stays in the background:** opening a chat from the puck no longer brings Claude to the front (Settings → Claude → "Bring Claude to the front…" turns it back on). Voice is typed into Claude in the background; only if that doesn't take does Claude come forward for a moment, and then the app you were using comes back.
+- The puck's boot screen says **Puck Bridge** instead of "Harness".
 - **One puck tab per Claude Code project again** (owner's choice): hold the face → Chats, then each project as Claude's sidebar groups them, with its 16 newest sessions. The single Claude Code tab showed only the 16 newest sessions of all projects, so quieter projects never appeared.
 ### Fixed
 - **Folded projects** in Claude's Code sidebar now get a tab too, and keep the sessions Puck Bridge last saw (a folded project shows no sessions to read). Picking a folded project on the puck unfolds it in Claude; opening or speaking to one of its sessions unfolds it first. A project never unfolded since Puck Bridge started shows an empty tab until it's picked or unfolded once.

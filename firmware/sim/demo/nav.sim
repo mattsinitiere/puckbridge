@@ -1,0 +1,122 @@
+# Puck Bridge firmware pb.5 navigation (owner 2026-10-14): the clock is home; down the notifications, up the settings,
+# left the Claude Code groups, left again the chats; a group opens its sessions (with their PR status); a row opens its
+# face; right goes back. The boot screen says "Puck Bridge".
+log 3
+autoping 1
+shot out/renders/nav_00_boot.png
+include demo/lib/welcome.sim
+include demo/lib/lists_data.sim
+include demo/lib/pbhost.sim
+in {"t":"pb.ui","lists":"cards"}
+in {"t":"summary","agentId":"c3","name":"Grocery list","engine":"claude","machine":"Mac Studio","recap":"Added oat milk to the list.","text":"Added oat milk to the list."}
+time +500
+boot tap
+time +300
+expect view CLOCK
+shot out/renders/nav_01_clock.png
+echo --- down: the notifications; up goes back
+swipe 233 140 233 330 250
+time +300
+expect view INBOX
+shot out/renders/nav_02_notifications.png
+swipe 233 330 233 140 250
+time +300
+expect view CLOCK
+echo --- up: the settings; down at the top goes back
+mark
+swipe 233 330 233 140 250
+time +200
+expect view PBMENU
+expect out {"t":"pb.menu.open"}
+include demo/lib/menu_pb5.sim
+time +300
+shot out/renders/nav_03_settings.png
+swipe 233 330 233 150 400
+time +300
+shot out/renders/nav_03b_settings_more.png
+swipe 233 150 233 330 400
+time +300
+expect view PBMENU
+swipe 233 150 233 340 250
+time +300
+expect view CLOCK
+echo --- left: the Claude Code groups; browsing switches nothing
+mark
+swipe 330 233 120 233 250
+time +300
+expect view GROUPS
+shot out/renders/nav_04_groups.png
+swipe 233 300 233 200 500
+time +700
+expect view GROUPS
+expect noout swarm.select
+shot out/renders/nav_05_groups_moved.png
+swipe 233 200 233 300 500
+time +700
+echo --- tap a group: the tab handshake, then its sessions with their status
+mark
+tap 233 233 120
+time +200
+expect out {"t":"swarm.select","swarmId":"code-a1"}
+shot out/renders/nav_06_group_opening.png
+in {"t":"swarms","selected":"code-a1","items":[{"id":"chats","name":"Chats","agents":5,"panes":5,"working":1},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3,"working":1},{"id":"code-b2","name":"openharness","agents":1,"panes":1,"working":0},{"id":"code-c3","name":"website","agents":2,"panes":2,"working":0},{"id":"code-d4","name":"finishes-app","agents":4,"panes":4,"working":2}],"tiles":[]}
+time +100
+expect out {"t":"agents.refresh"}
+in {"t":"agents.begin"}
+in {"t":"agent","id":"cc-1","name":"Puck tabs per project","project":"puckbridge","status":"PR #12 open","tone":"open","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"cc-2","name":"Fix the release build","project":"puckbridge","status":"PR #9 merged","tone":"merged","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"cc-3","name":"App icon","project":"puckbridge","status":"PR #7 closed","tone":"closed","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":3,"tab":"code-a1"}
+in {"t":"turn.started","agentId":"cc-1","text":"Writing…"}
+in {"t":"focus","agentId":"cc-1","keepClock":true}
+time +400
+expect view AGENTS
+shot out/renders/nav_07_group_sessions.png
+echo --- tap a session: its face; right goes back to the list
+mark
+tap 233 233 120
+time +400
+expect view AGENT
+expect out {"t":"focus"
+shot out/renders/nav_08_session_face.png
+swipe 120 233 340 233 250
+time +300
+expect view AGENTS
+echo --- right on the list: the groups; left on the groups: the chats
+swipe 120 233 340 233 250
+time +300
+expect view GROUPS
+mark
+swipe 330 233 120 233 250
+time +200
+expect out {"t":"swarm.select","swarmId":"chats"}
+in {"t":"swarms","selected":"chats","items":[{"id":"chats","name":"Chats","agents":5,"panes":5,"working":1},{"id":"code-a1","name":"puckbridge","agents":3,"panes":3,"working":1},{"id":"code-b2","name":"openharness","agents":1,"panes":1,"working":0},{"id":"code-c3","name":"website","agents":2,"panes":2,"working":0},{"id":"code-d4","name":"finishes-app","agents":4,"panes":4,"working":2}],"tiles":[]}
+time +100
+expect out {"t":"agents.refresh"}
+in {"t":"agents.begin"}
+in {"t":"agent","id":"c1","name":"Trip planning","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c2","name":"Swift refactor","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c3","name":"Grocery list","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c4","name":"Kitchen remodel budget and contractor questions","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agent","id":"c5","name":"Birthday ideas","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":5,"tab":"chats"}
+in {"t":"focus","agentId":"c1","keepClock":true}
+time +400
+expect view AGENTS
+shot out/renders/nav_09_chats.png
+echo --- right twice: the groups, then the clock
+swipe 120 233 340 233 250
+time +300
+expect view GROUPS
+swipe 120 233 340 233 250
+time +300
+expect view CLOCK
+echo --- the dial and the compact list browse up and down too
+in {"t":"pb.ui","lists":"dial"}
+swipe 330 233 120 233 250
+time +300
+expect view GROUPS
+shot out/renders/nav_10_groups_dial.png
+in {"t":"pb.ui","lists":"compact"}
+time +100
+shot out/renders/nav_11_groups_compact.png

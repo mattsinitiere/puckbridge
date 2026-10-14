@@ -22,7 +22,7 @@ expect view AGENTS
 shot out/renders/lists_dial_chats.png
 echo --- browsing moves the list and opens nothing
 mark
-swipe 300 233 190 233 500
+swipe 233 300 233 200 500
 time +700
 expect view AGENTS
 expect noout {"t":"focus"
@@ -40,9 +40,9 @@ expect view TABS
 shot out/renders/lists_dial_tabs.png
 echo --- browsing the tabs switches nothing
 mark
-swipe 300 233 190 233 500
+swipe 233 300 233 200 500
 time +700
-swipe 300 233 190 233 500
+swipe 233 300 233 200 500
 time +700
 expect view TABS
 expect noout swarm.select

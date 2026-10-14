@@ -33,7 +33,8 @@ enum Pref {
     static let d = UserDefaults.standard
     private static func bool(_ k: String, _ def: Bool) -> Bool { d.object(forKey: k) as? Bool ?? def }
     static var openOnSelect: Bool { get { bool("openOnSelect", true) } set { d.set(newValue, forKey: "openOnSelect") } }
-    static var bringForward: Bool { get { bool("bringForward", true) } set { d.set(newValue, forKey: "bringForward") } }
+    /// Bring Claude to the front when a chat is opened from the puck (off: Claude opens it in the background).
+    static var bringForward: Bool { get { bool("bringForward", false) } set { d.set(newValue, forKey: "bringForward") } }
     static var voiceSends: Bool { get { bool("voiceSends", true) } set { d.set(newValue, forKey: "voiceSends") } }
     static var takePuck: Bool { get { bool("takePuck", true) } set { d.set(newValue, forKey: "takePuck") } }
     static var showReply: Bool { get { bool("showReply", true) } set { d.set(newValue, forKey: "showReply") } }
@@ -56,6 +57,8 @@ enum Pref {
     static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
     /// How the puck draws its chat and tab lists (Puck Bridge firmware pb.5): "cards", "dial", "compact" or "classic".
     static var listStyle: String { get { d.string(forKey: "listStyle") ?? "cards" } set { d.set(newValue, forKey: "listStyle") } }
+    /// The puck's appearance (Puck Bridge firmware pb.6): "dark", "light" or "auto" (follow the Mac).
+    static var puckTheme: String { get { d.string(forKey: "puckTheme") ?? "dark" } set { d.set(newValue, forKey: "puckTheme") } }
     static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
     /// The last timer length started on the puck, in minutes.
     static var timerLast: Int { get { d.object(forKey: "timerLast") as? Int ?? 5 } set { d.set(newValue, forKey: "timerLast") } }
@@ -543,6 +546,12 @@ func soundName(_ id: String) -> String { SOUND_STYLES.first { $0.id == id }?.nam
 /// The puck's list styles (`pb.ui {lists}`, Puck Bridge firmware pb.5); "classic" is the official firmware's green pages.
 let LIST_STYLES: [(id: String, name: String)] = [("cards", "Cards"), ("dial", "Dial"), ("compact", "Compact list"), ("classic", "Classic")]
 func listStyleName(_ id: String) -> String { LIST_STYLES.first { $0.id == id }?.name ?? "Cards" }
+let PUCK_THEMES: [(id: String, name: String)] = [("dark", "Dark"), ("light", "Light"), ("auto", "Match Mac")]
+func puckThemeName(_ id: String) -> String { PUCK_THEMES.first { $0.id == id }?.name ?? "Dark" }
+/// The theme the puck should show now: "auto" follows the Mac's light/dark appearance.
+func puckThemeNow() -> String {
+    Pref.puckTheme != "auto" ? Pref.puckTheme : UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark" ? "dark" : "light"
+}
 
 let CUSTOM_ID = "custom"   // the old single "your own" slot; migrated into the library
 let LIB_PREFIX = "lib:"
@@ -1742,7 +1751,7 @@ final class Bridge {
         pushTabs()
         let tab = currentTab
         let eng = engine
-        let key = eng + "|" + tab.id + "#" + tab.items.map { "\($0.id)=\($0.name)" }.joined(separator: "|")
+        let key = eng + "|" + tab.id + "#" + tab.items.map { "\($0.id)=\($0.name)=\($0.chat?.status ?? "")" }.joined(separator: "|")
         if !force && key == pushedKey { return }
         pushedKey = key
         send(["t": "agents.begin"])
@@ -1750,6 +1759,9 @@ final class Bridge {
             var m: [String: Any] = ["t": "agent", "id": i.id, "name": fit(i.name), "engine": eng, "model": "", "effort": "",
                                     "machineId": MACHINE_ID, "machine": MACHINE_NAME]
             if let p = i.chat?.project { m["project"] = fit(p, bytes: 23) }   // Puck Bridge firmware shows it small
+            if pbFirmware >= 5, let c = i.chat, c.isCode, let st = Bridge.puckStatus(c.status) {
+                m["status"] = fit(st.text, bytes: 23); m["tone"] = st.tone   // "PR #5 merged", purple (firmware pb.6)
+            }
             send(m)
         }
         send(["t": "agents.end", "total": tab.items.count, "tab": tab.id])
@@ -2101,6 +2113,13 @@ final class Bridge {
             lists.index = LIST_STYLES.firstIndex { $0.id == Pref.listStyle } ?? 0
             rows.append(lists)
         }
+        if pbFirmware >= 5 {
+            // Firmware pb.6 takes 12 rows.
+            var theme = MenuRow(id: "theme", label: "Appearance", value: puckThemeName(Pref.puckTheme))
+            theme.choices = PUCK_THEMES.map { MenuChoice($0.name) }
+            theme.index = PUCK_THEMES.firstIndex { $0.id == Pref.puckTheme } ?? 0
+            rows.append(theme)
+        }
         return rows
     }
 
@@ -2169,6 +2188,9 @@ final class Bridge {
         case "lists":
             guard LIST_STYLES.indices.contains(index) else { break }
             Pref.listStyle = LIST_STYLES[index].id; sendLists()
+        case "theme":
+            guard PUCK_THEMES.indices.contains(index) else { break }
+            Pref.puckTheme = PUCK_THEMES[index].id; sendLists()
         default:
             break
         }
@@ -2205,8 +2227,10 @@ final class Bridge {
     /// The puck's list style (firmware pb.5, hello "pb" 4). It keeps it in RAM, so it's sent after every welcome.
     func sendLists() {
         guard greeted, pbFirmware >= 4 else { return }
-        send(["t": "pb.ui", "lists": Pref.listStyle])
-        say("Puck lists → \(listStyleName(Pref.listStyle))")
+        var m: [String: Any] = ["t": "pb.ui", "lists": Pref.listStyle]
+        if pbFirmware >= 5 { m["theme"] = puckThemeNow() }   // firmware pb.6
+        send(m)
+        say("Puck lists → \(listStyleName(Pref.listStyle))\(pbFirmware >= 5 ? ", \(puckThemeNow()) theme" : "")")
     }
 
     func menuTap(_ id: String) {
@@ -2568,21 +2592,18 @@ final class Bridge {
             if let c = c {
                 target = c
                 if c.id != lastOpened || switched {
-                    claude.open(c, bringForward: true)
+                    claude.open(c, bringForward: false)
                     let cid = c.id
                     perform { $0.lastOpenedId = cid; $0.openedFromPuck = cid; $0.openedAt = Date() }
                     Thread.sleep(forTimeInterval: 1.0)
                 }
             }
         }
-        claude.running?.activate()
-        // Wait for Claude to really be in front, so ⌘V can't land in another app.
-        for _ in 0..<20 where NSWorkspace.shared.frontmostApplication?.bundleIdentifier != CLAUDE_BUNDLE {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == CLAUDE_BUNDLE else {
-            say("Voice: Claude didn't come to the front; not typing"); return target
-        }
+        // Claude stays where it is (owner, Oct 2026: "only running"): the words are pasted into its message box in the
+        // background first. Only if that didn't take does Claude come forward for a moment, and then the app you were
+        // using comes back.
+        let before = NSWorkspace.shared.frontmostApplication
+        let wasFront = before?.bundleIdentifier == CLAUDE_BUNDLE
         v = claude.read()
         guard let box = v.composer else { say("Voice: couldn't find Claude's message box"); return target }
         AXUIElementSetAttributeValue(box, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -2596,14 +2617,47 @@ final class Bridge {
             return copy
         }
         pb.clearContents(); pb.setString(words, forType: .string)
-        let src = CGEventSource(stateID: .combinedSessionState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)   // V
-        let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-        down?.flags = .maskCommand; up?.flags = .maskCommand
-        down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: 0.5)
+        func commandV(toPid pid: pid_t?) {
+            let src = CGEventSource(stateID: .combinedSessionState)
+            let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)   // V
+            let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+            down?.flags = .maskCommand; up?.flags = .maskCommand
+            if let pid = pid { down?.postToPid(pid); up?.postToPid(pid) }
+            else { down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap) }
+        }
+        // Did the words land? The box's text holds them (its start, as rich text may reflow the rest).
+        let probe = String(words.prefix(16))
+        func landed() -> Bool { claude.read().composerText.contains(probe) }
+        var flashed = false
+        if !wasFront, let pid = claude.running?.processIdentifier {
+            commandV(toPid: pid)
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if wasFront || !landed() {
+            if !wasFront { say("Voice: background paste didn't take; bringing Claude forward for a moment") }
+            claude.running?.activate()
+            // Wait for Claude to really be in front, so ⌘V can't land in another app.
+            for _ in 0..<20 where NSWorkspace.shared.frontmostApplication?.bundleIdentifier != CLAUDE_BUNDLE {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == CLAUDE_BUNDLE else {
+                pb.clearContents(); if !saved.isEmpty { pb.writeObjects(saved) }
+                say("Voice: Claude didn't come to the front; not typing"); return target
+            }
+            flashed = !wasFront
+            if let b = claude.read().composer { AXUIElementSetAttributeValue(b, kAXFocusedAttribute as CFString, kCFBooleanTrue) }
+            Thread.sleep(forTimeInterval: 0.15)
+            commandV(toPid: nil)
+            Thread.sleep(forTimeInterval: 0.5)
+        } else {
+            say("Voice: pasted into Claude in the background")
+        }
         pb.clearContents()
         if !saved.isEmpty { pb.writeObjects(saved) }
+        defer {
+            // Claude came forward only to type: put back the app that was in front.
+            if flashed, let b = before { Thread.sleep(forTimeInterval: 0.3); b.activate() }
+        }
 
         if Pref.voiceSends {
             let after = claude.read()
@@ -2834,6 +2888,21 @@ final class Bridge {
             if lastOpenedId == o { lastOpenedId = n }
             if openedFromPuck == o { openedFromPuck = n }
         }
+    }
+
+    /// A Code session's sidebar status as the puck shows it: "#5 · Merged" → ("PR #5 merged", "merged"), "Idle" → ("Idle",
+    /// "idle"). The tone picks the colour: merged purple, open green, closed red, anything else grey.
+    static func puckStatus(_ raw: String) -> (text: String, tone: String)? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
+        var pr = "", word = s
+        if let m = s.range(of: "^#[0-9]+ · ", options: .regularExpression) {
+            pr = s[m].replacingOccurrences(of: " · ", with: "")
+            word = String(s[m.upperBound...])
+        }
+        let w = word.lowercased()
+        let tone = ["merged": "merged", "open": "open", "closed": "closed", "draft": "draft", "idle": "idle"][w] ?? ""
+        return (pr.isEmpty ? word : "PR \(pr) \(w)", tone)
     }
 
     /// "#5 · Merged" → "Merged": the part of a Code session's status that isn't its pull request number.
@@ -3297,6 +3366,12 @@ final class AppModel: ObservableObject {
         else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")!) }
     }
     func setWeather(_ on: Bool) { Pref.weatherOn = on; weather.refresh(); weatherChanged() }
+
+    func setPuckTheme(_ id: String) {
+        Pref.puckTheme = id
+        objectWillChange.send()
+        bridge.perform { $0.sendLists(); $0.sendMenu() }
+    }
 
     func setListStyle(_ id: String) {
         Pref.listStyle = id
@@ -3819,9 +3894,13 @@ struct PuckPane: View {
                         ForEach(LIST_STYLES, id: \.id) { st in Text(st.name).tag(st.id) }
                     }
                     .disabled(model.snap.pbFirmware < 4)
+                    Picker("Appearance", selection: Binding(get: { Pref.puckTheme }, set: { model.setPuckTheme($0) })) {
+                        ForEach(PUCK_THEMES, id: \.id) { t in Text(t.name).tag(t.id) }
+                    }
+                    .disabled(model.snap.pbFirmware < 5)
                     Text(model.snap.pbFirmware >= 4
                          ? "Cards: a column of cards. Dial: the clock's ring, one item at a time. Compact list: five rows at once. Classic: the original green pages. Also on the puck: Settings → Lists."
-                         : "Needs Puck Bridge firmware 0.0.88-pb.5 or newer (Firmware, below).")
+                         : "Needs Puck Bridge firmware 0.0.88-pb.5 or newer (Firmware, below). Appearance needs pb.6.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Sound") {
@@ -3892,14 +3971,14 @@ struct ClaudePane: View {
     @ObservedObject var model: AppModel
     @AppStorage("codeTabs") private var codeTabs = true
     @AppStorage("openOnSelect") private var openOnSelect = true
-    @AppStorage("bringForward") private var bringForward = true
+    @AppStorage("bringForward") private var bringForward = false
     @AppStorage("showReply") private var showReply = true
     @AppStorage("voiceSends") private var voiceSends = true
     var body: some View {
         Form {
             Section("Chats") {
                 Toggle("Open a chat in Claude when you stop on it on the puck", isOn: $openOnSelect)
-                Toggle("Bring Claude to the front when a chat opens", isOn: $bringForward)
+                Toggle("Bring Claude to the front when you open a chat on the puck", isOn: $bringForward)
             }
             Section("Claude Code") {
                 Toggle("Show Claude Code sessions as tabs on the puck", isOn: $codeTabs)
@@ -4157,6 +4236,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.weather.start()
 
         Thread.detachNewThread { [bridge] in bridge.run() }
+
+        // The puck's "Match Mac" appearance follows the Mac's light/dark switch.
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+                                                            object: nil, queue: .main) { [bridge] _ in
+            if Pref.puckTheme == "auto" { bridge.perform { $0.sendLists() } }
+        }
 
         // Quietly check for updates shortly after launch, then once a day.
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { self.model.checkUpdates(interactive: false) }

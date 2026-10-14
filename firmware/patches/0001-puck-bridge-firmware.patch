@@ -194,14 +194,15 @@ index 554dad9..84e2fe8 100644
  )
  
 diff --git a/devices/harness-device/firmware/main/app_main.c b/devices/harness-device/firmware/main/app_main.c
-index 1814868..549f4a2 100644
+index 1814868..8c5bc80 100644
 --- a/devices/harness-device/firmware/main/app_main.c
 +++ b/devices/harness-device/firmware/main/app_main.c
-@@ -95,6 +95,7 @@ static int refresh_projects(void)
+@@ -95,6 +95,8 @@ static int refresh_projects(void)
          ui_project_set_name(pr[i].id, pr[i].name);
          ui_project_set_engine(pr[i].id, pr[i].engine);
          ui_project_set_machine(pr[i].id, pr[i].machine_id, pr[i].machine);
 +        ui_project_set_project(pr[i].id, pr[i].project);
++        ui_project_set_status(pr[i].id, pr[i].status, pr[i].tone);
  
          ui_project_reconcile_selected_model(pr[i].id, pr[i].selected_model);
      }
@@ -363,7 +364,7 @@ index 4fa9182..24cccb4 100644
 +// muted or not, never while the microphone is open; the chosen sound and volume are left as they were.
 +void audio_notify_preview_sound(const char *style, int volume);
 diff --git a/devices/harness-device/firmware/main/cable_client.c b/devices/harness-device/firmware/main/cable_client.c
-index a2aadaa..fdb07ea 100644
+index a2aadaa..cbc15d6 100644
 --- a/devices/harness-device/firmware/main/cable_client.c
 +++ b/devices/harness-device/firmware/main/cable_client.c
 @@ -12,6 +12,7 @@
@@ -374,15 +375,17 @@ index a2aadaa..fdb07ea 100644
  #include "esp_log.h"
  #include "audio_capture.h"   // audio_notify_done() — the completion beep
  #include "audio_client.h"
-@@ -48,6 +49,7 @@ typedef struct {
+@@ -48,6 +49,9 @@ typedef struct {
      char effort[16];
      char machine_id[ID_MAX];    // which machine this agent lives on ("" from a daemon that predates it)
      char machine[CABLE_NAME_MAX];     // that machine's name, drawn under the agent's
 +    char project[CABLE_NAME_MAX];     // Puck Bridge: a Claude Code session's project, "" otherwise
++    char status[24];                  // Puck Bridge (pb 5): the sidebar's status in words ("PR #5 merged"), or ""
++    char tone[8];                     // its colour: merged, open, closed, draft, idle (or "")
  } cable_agent_t;
  
  
-@@ -329,6 +331,14 @@ static void send_hello(void)
+@@ -329,6 +333,16 @@ static void send_hello(void)
      // Custom pets: the newest pack version this build reads (2: a pack may carry a relaxing scene, pet_store.c; it
      // still reads 1), and these packs are already held, so the daemon sends only what is missing.
      msg_number(&root, "pets", 2);
@@ -393,11 +396,13 @@ index a2aadaa..fdb07ea 100644
 +    // 3: + `focus.keepClock`, `pb.timer` (and `pb.timer.state` / `pb.timer.done` back), choices' `sound` /
 +    // `volume` previews, agents' `project`, and the two-tab switch screen.
 +    // 4: + `pb.ui {lists}` (the list style: classic, cards, dial, compact) and the swarms' `working` counts.
-+    msg_number(&root, "pb", 4);
++    // 5: + the clock-home navigation with the new lists, the Claude Code groups page, agents' `status` / `tone`,
++    // `pb.ui {theme: dark|light}`, the settings as cards and up to 12 settings rows.
++    msg_number(&root, "pb", 5);
      {
          char held[PET_STORE_MAX_PACKS][17];
          const size_t n = pet_store_held(held, PET_STORE_MAX_PACKS);
-@@ -401,6 +411,44 @@ void cable_client_send_focus(const char *agent_id)
+@@ -401,6 +415,44 @@ void cable_client_send_focus(const char *agent_id)
      send_json(root);
  }
  
@@ -442,15 +447,17 @@ index a2aadaa..fdb07ea 100644
  void cable_client_send_open(const char *agent_id, const char *reason)
  {
      if (!agent_id || !agent_id[0]) return;
-@@ -832,6 +880,7 @@ int cable_client_list_agents_snapshot(project_t *out, int max, cable_agent_snaps
+@@ -832,6 +884,9 @@ int cable_client_list_agents_snapshot(project_t *out, int max, cable_agent_snaps
          snprintf(out[n].engine, sizeof(out[n].engine), "%s", s_agents[i].engine);
          snprintf(out[n].machine_id, sizeof(out[n].machine_id), "%s", s_agents[i].machine_id);
          snprintf(out[n].machine, sizeof(out[n].machine), "%s", s_agents[i].machine);
 +        snprintf(out[n].project, sizeof(out[n].project), "%s", s_agents[i].project);
++        snprintf(out[n].status, sizeof(out[n].status), "%s", s_agents[i].status);
++        snprintf(out[n].tone, sizeof(out[n].tone), "%s", s_agents[i].tone);
  
          // The [mark][Model][Effort] chip row reads ONE shape — the opaque runtime-v1 profile — so the
          // daemon's plain model/effort are assembled into it here rather than teaching the UI a second
-@@ -881,6 +930,8 @@ static void handle_swarms(const cJSON *p)
+@@ -881,6 +936,8 @@ static void handle_swarms(const cJSON *p)
          // before tiles were counted separately.
          const cJSON *panes = cJSON_GetObjectItemCaseSensitive(it, "panes");
          rows[n].panes = cJSON_IsNumber(panes) ? (panes->valueint > 0 ? panes->valueint : 0) : rows[n].agents;
@@ -459,16 +466,19 @@ index a2aadaa..fdb07ea 100644
          n++;
      }
      const char *selected = str_of(p, "selected");
-@@ -998,6 +1049,8 @@ static void handle_agent(const cJSON *p)
+@@ -998,6 +1055,11 @@ static void handle_agent(const cJSON *p)
              snprintf(a->machine_id, sizeof(a->machine_id), "%s", machine_id);
          const char *machine = str_of(p, "machine");
          if (machine) snprintf(a->machine, sizeof(a->machine), "%s", machine);
 +        const char *project = str_of(p, "project");
 +        if (project) snprintf(a->project, sizeof(a->project), "%s", project);
++        const char *status = str_of(p, "status"), *tone = str_of(p, "tone");
++        if (status && strlen(status) < sizeof a->status) snprintf(a->status, sizeof(a->status), "%s", status);
++        if (tone && strlen(tone) < sizeof a->tone) snprintf(a->tone, sizeof(a->tone), "%s", tone);
  
      }
      xSemaphoreGive(s_agents_lock);
-@@ -1215,6 +1268,73 @@ static void handle_pet_map(const cJSON *p)
+@@ -1215,6 +1277,75 @@ static void handle_pet_map(const cJSON *p)
      ui_pets_changed();
  }
  
@@ -530,6 +540,8 @@ index a2aadaa..fdb07ea 100644
 +{
 +    ui_pb_host();
 +    ui_pb_lists(str_of(p, "lists"));
++    const char *theme = str_of(p, "theme");
++    if (theme) ui_pb_theme(!strcmp(theme, "light"));
 +}
 +
 +// `pb.timer` (pb 3): start or replace the puck's countdown, `seconds` 0 cancels it; `label` is optional.
@@ -542,7 +554,7 @@ index a2aadaa..fdb07ea 100644
  static void handle_message(const cJSON *root)
  {
      const char *t = str_of(root, "t");
-@@ -1248,6 +1368,11 @@ static void handle_message(const cJSON *root)
+@@ -1248,6 +1379,11 @@ static void handle_message(const cJSON *root)
      if (strcmp(t, "settings.set") == 0) { handle_settings_set(p); return; }
      if (strcmp(t, "models") == 0) { handle_models(p); return; }
      if (strcmp(t, "swarms") == 0) { handle_swarms(p); return; }
@@ -554,7 +566,7 @@ index a2aadaa..fdb07ea 100644
  
      if (strcmp(t, "agent.updated") == 0) {
          // One agent changed. Cheapest correct answer is to re-ask: the daemon is on the other end of a
-@@ -1262,8 +1387,12 @@ static void handle_message(const cJSON *root)
+@@ -1262,8 +1398,12 @@ static void handle_message(const cJSON *root)
      if (agent_id && strnlen(agent_id, ID_MAX) >= ID_MAX) { s_bad++; return; }
  
      if (strcmp(t, "focus") == 0) {
@@ -569,7 +581,7 @@ index a2aadaa..fdb07ea 100644
          return;
      }
      // One line per turn-state message. This is the seam where "the daemon sent it" and "the tile moved"
-@@ -1277,6 +1406,8 @@ static void handle_message(const cJSON *root)
+@@ -1277,6 +1417,8 @@ static void handle_message(const cJSON *root)
          // is waiting on. Dropping it left the tile holding a live turn with nothing on screen that said so,
          // which reads exactly like the turn never started.
          const char *text = str_of(p, "text");
@@ -578,7 +590,7 @@ index a2aadaa..fdb07ea 100644
          if (agent_id) ui_project_emit(agent_id, "", "processing", text ? text : "", NULL);
          return;
      }
-@@ -1320,6 +1451,7 @@ static void handle_message(const cJSON *root)
+@@ -1320,6 +1462,7 @@ static void handle_message(const cJSON *root)
          // it: they are reading the last one, not watching for the next to end, and three tones is how
          // they learn a task is done without moving their eyes.
          audio_notify_done();
@@ -587,19 +599,22 @@ index a2aadaa..fdb07ea 100644
          // waking a dark panel, filing an entry in the drawer — and `quiet` is the daemon saying the
          // desktop window already has this agent on screen. The tile itself is still redrawn above: the
 diff --git a/devices/harness-device/firmware/main/cable_client.h b/devices/harness-device/firmware/main/cable_client.h
-index 3303ae8..84933bf 100644
+index 3303ae8..610655b 100644
 --- a/devices/harness-device/firmware/main/cable_client.h
 +++ b/devices/harness-device/firmware/main/cable_client.h
-@@ -46,6 +46,8 @@ typedef struct {
+@@ -46,6 +46,11 @@ typedef struct {
      // showing an empty line.
      char machine_id[ID_MAX];
      char machine[CABLE_NAME_MAX];
 +    // Puck Bridge (pb 3): the project a Claude Code session belongs to, "" for a chat or from any other host.
 +    char project[CABLE_NAME_MAX];
++    // Puck Bridge (pb 5): the session's status in words ("PR #5 merged") and its colour ("merged", "open", ...).
++    char status[24];
++    char tone[8];
  } project_t;
  
  
-@@ -173,6 +175,8 @@ typedef struct {
+@@ -173,6 +178,8 @@ typedef struct {
      // swarm_picker_rebuild(). A daemon too old to send it reports panes==agents, which is the old
      // behaviour exactly.
      int  panes;
@@ -608,7 +623,7 @@ index 3303ae8..84933bf 100644
  } cable_swarm_t;
  
  /*
-@@ -241,6 +245,16 @@ void cable_client_send_focus(const char *agent_id);
+@@ -241,6 +248,16 @@ void cable_client_send_focus(const char *agent_id);
  // unanswered question, and each used to open a tab).
  void cable_client_send_open(const char *agent_id, const char *reason);
  
@@ -2327,8 +2342,54 @@ index 4b4f44f..bcd7d69 100644
  bool habitat_is_voice_view(void);
  void habitat_touch(bool down, int x, int y, uint32_t now_ms);
  // The driver calls this on an untrusted sample, then swallows contact until a real release.
+diff --git a/devices/harness-device/firmware/main/ui/habitat/terminal.c b/devices/harness-device/firmware/main/ui/habitat/terminal.c
+index f0f74c0..f91c807 100644
+--- a/devices/harness-device/firmware/main/ui/habitat/terminal.c
++++ b/devices/harness-device/firmware/main/ui/habitat/terminal.c
+@@ -98,8 +98,28 @@ static uint32_t font_codepoint(const ht_font_t *font, uint32_t cp)
+     if (cp >= font->first && cp <= font->last) return cp;
+     return font->first <= '?' && font->last >= '?' ? '?' : ' ';
+ }
++/*
++ * PUCK BRIDGE'S LIGHT MODE (pb 6, owner 2026-10-14: "a full light mode too"): every colour the screens ask for goes
++ * through here, so one mapping turns the whole glass light. Greys flip (black ground -> soft white #f5f5f2, white
++ * text -> near black, a dark card -> a light grey one), and a colour keeps its hue but is darkened until it reads on
++ * white (the green, the orange, a PR's purple). The pets' own colours are baked RGB565 and never come through here.
++ */
++bool ht_light_theme;
++static unsigned light_rgb(unsigned c)
++{
++    int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
++    int hi = r > g ? (r > b ? r : b) : (g > b ? g : b), lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
++    if (hi - lo < 48) {   // a grey (or nearly): flip it, black to #f5f5f2, white to #0a0a0a
++        r = 245 - r * 235 / 255; g = 245 - g * 235 / 255; b = 242 - b * 232 / 255;
++    } else {              // a colour: darker until its luma is at most 112 of 255
++        int y = (299 * r + 587 * g + 114 * b) / 1000;
++        if (y > 112) { r = r * 112 / y; g = g * 112 / y; b = b * 112 / y; }
++    }
++    return (unsigned)(r << 16 | g << 8 | b);
++}
+ uint16_t ht_rgb(unsigned c)
+ {
++    if (ht_light_theme) c = light_rgb(c);
+     return (uint16_t)(((c >> 8) & 0xf800) | ((c >> 5) & 0x07e0) | ((c >> 3) & 0x1f));
+ }
+ uint32_t ht_utf8_next(const char **p)
+diff --git a/devices/harness-device/firmware/main/ui/habitat/terminal.h b/devices/harness-device/firmware/main/ui/habitat/terminal.h
+index d0ba7f5..6f41d79 100644
+--- a/devices/harness-device/firmware/main/ui/habitat/terminal.h
++++ b/devices/harness-device/firmware/main/ui/habitat/terminal.h
+@@ -172,6 +172,8 @@ typedef struct {
+     uint32_t pixels;
+ } ht_damage_t;
+ uint16_t ht_rgb(unsigned rgb);
++// Puck Bridge (pb 6): ht_rgb maps every colour for the light theme while this is set.
++extern bool ht_light_theme;
+ void ht_scene_clear(ht_scene_t *scene, uint16_t background);
+ bool ht_text(ht_scene_t *scene, int x, int y, int width, const ht_font_t *font, uint16_t fg,
+              uint16_t bg, const char *text);
 diff --git a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
-index f3c3fa2..226ad34 100644
+index f3c3fa2..55e27c0 100644
 --- a/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 +++ b/devices/harness-device/firmware/main/ui/habitat/ui_habitat.c
 @@ -15,6 +15,7 @@
@@ -2339,7 +2400,7 @@ index f3c3fa2..226ad34 100644
  #ifdef DEVICE_CREATURE_GALLERY
  #include "creature_gallery.h"
  static ht_gallery_t gallery;
-@@ -90,7 +91,11 @@ typedef enum {
+@@ -90,7 +91,12 @@ typedef enum {
      STOP,
      MODELS,
      MESSAGE,
@@ -2348,11 +2409,12 @@ index f3c3fa2..226ad34 100644
 +    CLOCK,     // Puck Bridge: the desk clock, home for the small button and for idle (pb_tick)
 +    PBMENU,    // Puck Bridge: the settings list the Mac sends (pb.menu)
 +    PICKER,    // Puck Bridge: one settings row's choices, paged (pb.menu "choices")
-+    TIMER      // Puck Bridge: the timer rang (pb.timer); any touch or the small button stops it
++    TIMER,     // Puck Bridge: the timer rang (pb.timer); any touch or the small button stops it
++    GROUPS     // Puck Bridge (pb 5): the Claude Code groups (the host's code-* tabs), left of the clock
  } view_t;
  typedef enum {
      A_NONE,
-@@ -128,7 +133,10 @@ typedef enum {
+@@ -128,7 +134,12 @@ typedef enum {
      A_SELECT_BEGIN, A_SELECT_FIND, A_SELECT_EXTEND, A_SELECT_SEND, A_RETURN, A_LATEST, A_VISIT_SEND,
      A_CARRY, A_CARRY_DROP, A_CARRY_SEND,
      A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
@@ -2360,19 +2422,22 @@ index f3c3fa2..226ad34 100644
 +    A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ,
 +    A_PBMENU_OPEN, A_PBMENU_TAP,
 +    A_PB_PICK, A_PB_CHOOSE, A_PB_BACK,  // the picker: page to a choice, choose it, leave without choosing
-+    A_PB_TIMER_STATE, A_PB_TIMER_DONE   // the worker's: pb.timer.state (seconds: value), pb.timer.done (reason: text)
++    A_PB_TIMER_STATE, A_PB_TIMER_DONE,  // the worker's: pb.timer.state (seconds: value), pb.timer.done (reason: text)
++    A_GROUP, A_PB_GROUPS, A_PB_CHATS,   // pb 5: a group tapped (id: its tab), the groups list, the chats list
++    A_PB_INBOX                          // pb 5: the notifications, from the clock
  } action_kind_t;
  typedef struct {
      action_kind_t kind;
-@@ -155,6 +163,7 @@ typedef struct {
+@@ -155,6 +166,8 @@ typedef struct {
      // The row receives the same bounded result stored in pane memory. Keeping
      // an unused 4 KB tail here wasted RAM and enlarged every roster swap.
      char preview[240], full[PANE_RESULT_BYTES], tool[100];
 +    char project[CABLE_NAME_MAX];   // Puck Bridge (pb 3): a Claude Code session's project, "" otherwise
++    char status[24], tone[8];       // Puck Bridge (pb 5): its sidebar status in words, and that status's colour
      bool busy, has_event, recap_ready;
      uint32_t busy_ms, last_busy;
      int tokens;
-@@ -246,6 +255,72 @@ static EXT_RAM_BSS_ATTR struct {
+@@ -246,6 +259,74 @@ static EXT_RAM_BSS_ATTR struct {
      int start_x, start_y, last_x, last_y;
      uint32_t touch_started;
  } s;
@@ -2421,6 +2486,8 @@ index f3c3fa2..226ad34 100644
 +    // working pane once a second, so its "Working · 1:23" counts.
 +    uint8_t lists;
 +    uint32_t list_sec;
++    // pb 5: a group or the chats were chosen from the groups list; their list (not the face) opens when it lands.
++    bool land_list;
 +} pb = {.idle_min = 5, .count = -1};
 +enum { PB_LISTS_CLASSIC, PB_LISTS_CARDS, PB_LISTS_DIAL, PB_LISTS_COMPACT };
 +
@@ -2445,14 +2512,27 @@ index f3c3fa2..226ad34 100644
  static QueueHandle_t actions;
  static _Atomic(TaskHandle_t) reload_waiter;
  static atomic_bool reload_requested;
-@@ -263,6 +338,17 @@ static ht_draft_t draft;
+@@ -255,7 +336,8 @@ static ht_selection_t selection;
+ static ht_workspace_t workspace;
+ static ht_tab_carousel_t tab_carousel;
+ static ht_tab_carousel_t pane_carousel;   // Focus's pane picker, the same pages as the tabs (design 2026-10-06)
+-static ht_tab_carousel_t inbox_carousel;  // Focus's inbox, paged the same way; it follows s.offset when at rest
++static ht_tab_carousel_t inbox_carousel;
++static ht_tab_carousel_t group_carousel;   // pb 5: the Claude Code groups list  // Focus's inbox, paged the same way; it follows s.offset when at rest
+ static ht_carry_t carry;
+ static ht_visit_t visit;
+ static ht_form_t form;
+@@ -263,6 +345,20 @@ static ht_draft_t draft;
  static bool selection_emit(const ht_select_command_t *command, void *ctx);
  static ht_gesture_t gesture;
  static ht_character_t character;
 +// The list style in force: Puck Bridge's, on the Focus face only (the creature skins keep their own lists).
 +static int pb_lists(void) { return pb.host && character.id == HT_CHARACTER_FOCUS ? pb.lists : PB_LISTS_CLASSIC; }
-+// Cards and the compact list scroll up and down; the dial and the classic pages turn sideways.
-+static bool pb_lists_vertical(void) { return pb_lists() == PB_LISTS_CARDS || pb_lists() == PB_LISTS_COMPACT; }
++// PUCK BRIDGE'S NAVIGATION (pb 5, owner 2026-10-14), on with any of the new list styles: the clock is home; down is the
++// notifications, up the settings, left the Claude Code groups and left again the chats; right goes back. Sideways is
++// navigation, so every list (the dial too) scrolls up and down. Classic keeps pb 4's side pages and paged lists.
++static bool pb_nav(void) { return pb_lists() != PB_LISTS_CLASSIC; }
++static bool pb_lists_vertical(void) { return pb_nav(); }
 +static int pb_lists_axis(void) { return pb_lists_vertical() ? 1 : 2; }
 +// The coordinate a list's carousel follows: y for the vertical styles (twice it for the compact list's short rows,
 +// so a row follows the finger), x otherwise.
@@ -2463,7 +2543,7 @@ index f3c3fa2..226ad34 100644
  static ht_character_id_t device_skin, desktop_companion = HT_CHARACTER_COUNT;
  static bool follow_companion = true, companion_celebrating;
  /*
-@@ -289,6 +375,15 @@ static ht_character_caption_t home_caption;
+@@ -289,6 +385,17 @@ static ht_character_caption_t home_caption;
  static action_t pressed_action;
  static bool queue(action_t a);
  static void view(view_t v);
@@ -2473,13 +2553,15 @@ index f3c3fa2..226ad34 100644
 +static void pb_timer_text(char *dst, size_t cap, int seconds);
 +static void pb_timer_silence(const char *reason, bool report);
 +static bool pb_tabs(void);
-+static void pb_styled_list(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs);
++static void pb_styled_list(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map,
++                           action_kind_t pick);
++static void render_groups(ht_scene_t *f);
 +static void pb_clean(char *dst, size_t cap, const char *src, const ht_font_t *font);
 +static void pb_upper(char *dst, size_t cap, const char *src);
  static const char *voice_status(void);
  static uint32_t ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
  static void copy(char *dst, size_t cap, const char *src)
-@@ -297,7 +392,10 @@ static void copy(char *dst, size_t cap, const char *src)
+@@ -297,7 +404,10 @@ static void copy(char *dst, size_t cap, const char *src)
          return;
      if (!src)
          src = "";
@@ -2491,7 +2573,7 @@ index f3c3fa2..226ad34 100644
      memmove(dst, src, n);
      dst[n] = 0;
  }
-@@ -556,6 +654,7 @@ static void view(view_t v)
+@@ -556,6 +666,7 @@ static void view(view_t v)
      if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
      input_cancel();
      s.voice_retry_until = 0;
@@ -2499,7 +2581,7 @@ index f3c3fa2..226ad34 100644
      s.view = v;
      s.offset = 0;
      s.pressed = -1;
-@@ -602,7 +701,9 @@ static void tab_request(const char *id, bool browsing)
+@@ -602,7 +713,9 @@ static void tab_request(const char *id, bool browsing)
      if (!queue(a)) { workspace_failed("Device busy. Choose the tab again."); return; }
      ht_visit_close(&visit); s.pending_focus[0]=0;
      s.loading=true;
@@ -2510,7 +2592,7 @@ index f3c3fa2..226ad34 100644
          COPY(s.title,"Switching tab"); COPY(s.message,"Opening your workspace...");
          view(MESSAGE);
      }
-@@ -610,7 +711,8 @@ static void tab_request(const char *id, bool browsing)
+@@ -610,7 +723,8 @@ static void tab_request(const char *id, bool browsing)
  }
  static void tabs_sync(void)
  {
@@ -2520,18 +2602,39 @@ index f3c3fa2..226ad34 100644
      int index=ht_tab_carousel_index(&tab_carousel);
      if (index>=0 && index<s.tab_count) tab_request(s.tabs[index].id,true);
  }
-@@ -991,6 +1093,10 @@ static void surface_tick(uint32_t now)
+@@ -851,13 +965,14 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
+ static void render_brand(ht_scene_t *f)
+ {
+     if (character.id == HT_CHARACTER_FOCUS) {
+-        // The wordmark in Inter Bold 48 on a 50 px line at y 208 (design 2026-10-06, focus-project.html "Connecting").
+-        const ht_font_t *font = &ht_lv_inter_bold_48.base;
+-        int w = ht_measure(font, "Harness"), base = 208 + 50 / 2 + 48 * 93 / 256;
+-        ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Harness");
++        // Puck Bridge's build says its own name from the first frame (pb 5, owner: not "Harness"), in Inter 44 like
++        // the connecting screen's "Puck Bridge" (Inter Bold 48 is cut to the letters of "Harness" only).
++        const ht_font_t *font = &ht_lv_inter_44.base;
++        int w = ht_measure(font, "Puck Bridge");
++        ht_text(f, (HT_WIDTH - w) / 2, 233 - font->height / 2, w, font, FG, BG, "Puck Bridge");
+         return;
+     }
+-    center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
++    center(f, (466 - UI_FONT->height) / 2, "Puck Bridge", FG);
+ }
+ static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
+                     int value, bool enabled)
+@@ -991,6 +1106,11 @@ static void surface_tick(uint32_t now)
      }
      if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && !display_is_asleep() &&
          ht_tab_carousel_tick(&pane_carousel, now)) change();
-+    if ((s.view == AGENTS || s.view == TABS) && pb_lists() && !display_is_asleep() && now / 1000 != pb.list_sec) {
++    if (s.view == GROUPS && !display_is_asleep() && ht_tab_carousel_tick(&group_carousel, now)) change();
++    if ((s.view == AGENTS || s.view == TABS || s.view == GROUPS) && pb_lists() && !display_is_asleep() && now / 1000 != pb.list_sec) {
 +        pb.list_sec = now / 1000;   // "Working · 1:23" counts while a list is up
 +        for (int i = 0; i < s.count; i++) if (s.agents[i].busy) { change(); break; }
 +    }
      if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && !display_is_asleep() &&
          ht_tab_carousel_tick(&inbox_carousel, now)) {
          s.offset = ht_tab_carousel_index(&inbox_carousel);   // the page it settles on, rendered or not
-@@ -1002,6 +1108,11 @@ static void surface_tick(uint32_t now)
+@@ -1002,6 +1122,11 @@ static void surface_tick(uint32_t now)
      // The voice screen's listening scene runs while the finger is down (hold-to-talk); the pets do not.
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE) &&
          (int32_t)(now - s.pet_next_ms) >= 0) { s.pet_next_ms = 0; change(); }
@@ -2543,7 +2646,7 @@ index f3c3fa2..226ad34 100644
      bool main = s.view == HOME || s.view == AGENT;
      bool visible = !display_is_asleep() &&
          ((main && s.connected && !s.loading) || s.view == VOICE);
-@@ -1108,10 +1219,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
+@@ -1108,10 +1233,12 @@ static void focus_bell(ht_scene_t *f, unsigned count, int bell_y)
              HT_LV_BELL);
      ht_text(f, x + BELL_PAD_H + bw + BELL_GAP, bell_y + (h - cf->height) / 2, cw, cf, ink, blue, text);
  }
@@ -2556,7 +2659,7 @@ index f3c3fa2..226ad34 100644
      if (!s.connected || s.loading) { render_brand(f); return; }
      if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
      agent_t *a = active();
-@@ -1142,7 +1255,9 @@ static void render_home(ht_scene_t *f)
+@@ -1142,7 +1269,9 @@ static void render_home(ht_scene_t *f)
       * name still — see ht_character_face_t.
       */
      bool rotating = home_caption_rotates() && character.id != HT_CHARACTER_FOCUS;
@@ -2567,7 +2670,7 @@ index f3c3fa2..226ad34 100644
      bool bell = !s.voice_retry_until && !carry.active && !carry.error[0] && !visit.available;
      unsigned unread = notice_unread(a ? a->id : NULL);
      bell = bell && unread > 0;
-@@ -1177,7 +1292,8 @@ static void render_home(ht_scene_t *f)
+@@ -1177,7 +1306,8 @@ static void render_home(ht_scene_t *f)
          .straight_title = s.straight_title,
          .footer_action = carry.active || carry.error[0] || visit.available,
          .ink = FG, .foreground = FG, .dim = DIM,
@@ -2577,7 +2680,7 @@ index f3c3fa2..226ad34 100644
      char carried[128];
      if (carry.active) {
          snprintf(carried,sizeof(carried),"%d line%s from %.70s",carry.rows,carry.rows==1?"":"s",carry.source);
-@@ -1193,6 +1309,12 @@ static void render_home(ht_scene_t *f)
+@@ -1193,6 +1323,12 @@ static void render_home(ht_scene_t *f)
      }
      ht_character_face(f, &character, &f_, ACCENT, recap);
      s.pet_next_ms = focus_face ? ht_focus_pet_next_ms(&f_, recap) : 0;
@@ -2590,7 +2693,7 @@ index f3c3fa2..226ad34 100644
      // The working face says it with the pet's bell bubble; every other face keeps the pill at 400.
      ht_rect_t bubble = {0};
      bool told = bell && focus_face && ht_focus_alert_shown(&f_, recap, &bubble);
-@@ -1334,7 +1456,10 @@ static const char *pane_label(int i)
+@@ -1334,7 +1470,10 @@ static const char *pane_label(int i)
  static void render_focus_panes(ht_scene_t *f)
  {
      uint16_t fg = color(0xeaeaf0), pressed_fill = color(0x30333f);   // the Choose-a-tab pill's ink and press
@@ -2602,11 +2705,11 @@ index f3c3fa2..226ad34 100644
      if (!s.count) {
          /*
           * NO PANES (design 2026-10-06, focus-project.html "Panes, none"): "No panes in / this tab." on two Inter 44
-@@ -1363,7 +1488,15 @@ static void render_focus_panes(ht_scene_t *f)
+@@ -1363,7 +1502,15 @@ static void render_focus_panes(ht_scene_t *f)
      // that comes or goes keeps them in step. Done (green, at the foot) and a tap on the chosen page open it.
      if (pane_carousel.count != s.count)
          ht_tab_carousel_reset(&pane_carousel, s.count, s.active >= 0 && s.active < s.count ? s.active : 0);
-+    if (pb_lists()) { pb_styled_list(f, &pane_carousel, s.count, false); return; }
++    if (pb_lists()) { pb_styled_list(f, &pane_carousel, s.count, false, NULL, A_AGENT); return; }
      focus_carousel(f, &pane_carousel, s.count, pane_label, A_AGENT);
 +    int shown = ht_tab_carousel_index(&pane_carousel);
 +    if (pb.host && shown >= 0 && shown < s.count && s.agents[shown].project[0] && !pane_carousel.touching &&
@@ -2618,7 +2721,7 @@ index f3c3fa2..226ad34 100644
      ht_text(f, (HT_WIDTH - ht_done_28.width) / 2, 400, ht_done_28.width, &ht_done_28,
              s.connected ? color(HT_THEME_VOICE) : DIM, BG, HT_DONE);
      s.hits[s.hit_count++] = (hit_t){{83, 392, 300, 74}, A_AGENT, ht_tab_carousel_index(&pane_carousel), s.connected};
-@@ -1519,6 +1652,11 @@ static int settings_count(void)
+@@ -1519,6 +1666,11 @@ static int settings_count(void)
      while (settings_item(count, NULL)) count++;
      return count;
  }
@@ -2630,7 +2733,7 @@ index f3c3fa2..226ad34 100644
  static void tabs_move(int dy)
  {
      // Move by one name while the finger is down, rather than paging by three
-@@ -1527,7 +1665,8 @@ static void tabs_move(int dy)
+@@ -1527,7 +1679,8 @@ static void tabs_move(int dy)
      int step = s.tab_drag / TAB_ROW_HEIGHT;
      if (!step) return;
      s.tab_drag %= TAB_ROW_HEIGHT;
@@ -2640,7 +2743,7 @@ index f3c3fa2..226ad34 100644
      int last = count > TAB_ROWS ? count - TAB_ROWS : 0;
      int next = s.offset + step;
      if (next < 0) next = 0;
-@@ -1683,8 +1822,283 @@ static void render_focus_tabs(ht_scene_t *f)
+@@ -1683,8 +1836,323 @@ static void render_focus_tabs(ht_scene_t *f)
      }
      focus_carousel(f, &tab_carousel, s.tab_count, tab_label, A_TAB);
  }
@@ -2727,6 +2830,12 @@ index f3c3fa2..226ad34 100644
 +        if (!s.notice[i].read_on_dial && !strcmp(s.notice[i].agent_id, id)) return true;
 +    return false;
 +}
++// A status's colour (pb 5 `tone`): merged purple, open green, closed red; draft, idle and anything else grey.
++static unsigned pb_tone(const char *tone)
++{
++    return !strcmp(tone, "merged") ? 0xa371f7 : !strcmp(tone, "open") ? 0x3fb950 : !strcmp(tone, "closed") ? 0xf85149
++         : 0x3a3a42;
++}
 +static void pb_row(int i, bool tabs, pb_row_t *r)
 +{
 +    memset(r, 0, sizeof *r);
@@ -2758,6 +2867,11 @@ index f3c3fa2..226ad34 100644
 +    } else if (pb_unread(a->id)) {
 +        snprintf(r->sub, sizeof r->sub, "Reply ready");
 +        r->dot = PB_INK_UNREAD; r->sub_ink = 0xd6d6d2;
++    } else if (a->status[0]) {
++        // pb 5: the session's sidebar status in words, coloured as GitHub colours a pull request.
++        snprintf(r->sub, sizeof r->sub, "%s", a->status);
++        r->dot = pb_tone(a->tone);
++        r->sub_ink = r->dot == 0x3a3a42 ? 0x8a8a99 : r->dot;
 +    } else {
 +        snprintf(r->sub, sizeof r->sub, "Idle");
 +        r->dot = 0x3a3a42;
@@ -2784,7 +2898,7 @@ index f3c3fa2..226ad34 100644
 +    if (tw <= 0) { fit[0] = 0; tw = 1; }
 +    ht_text(f, x, y, tw, font, color(ink), bg, fit);
 +}
-+static void pb_list_cards(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, action_kind_t pick)
++static void pb_list_cards(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map, action_kind_t pick)
 +{
 +    enum { SPACING = 112, TOP = 86, BOTTOM = 396 };
 +    int current = ht_tab_carousel_index(c);
@@ -2794,13 +2908,14 @@ index f3c3fa2..226ad34 100644
 +        int e = ad >= SPACING ? 0 : 256 - ad * 256 / SPACING;   // 256 in the middle, 0 a card away
 +        int w = 340 + 44 * e / 256, h = 76 + 26 * e / 256, x = (HT_WIDTH - w) / 2, y = 233 + d - h / 2;
 +        if (y < TOP || y + h > BOTTOM) continue;
++        int ri = map ? map[i] : i;
 +        pb_row_t r;
-+        pb_row(i, tabs, &r);
++        pb_row(ri, tabs, &r);
 +        bool big = e > 128;
 +        uint16_t fill = color(big ? 0x1c1e26 : 0x131316);
 +        unsigned rim = big ? (s.connected ? HT_THEME_VOICE : 0x3a3f4b) : 0x2a2c33;
 +        int hit = s.hit_count++;
-+        s.hits[hit] = (hit_t){{x, y, w, h}, pick, i, s.connected};
++        s.hits[hit] = (hit_t){{x, y, w, h}, pick, ri, s.connected};
 +        if (hit == s.pressed) fill = color(0x30333f);
 +        ht_box(f, x, y, w, h, big ? 26 : 22, fill, color(rim));
 +        const ht_font_t *nf = big ? &ht_lv_inter_30.base : &ht_lv_inter_25.base, *sf = &ht_lv_inter_20.base;
@@ -2816,9 +2931,9 @@ index f3c3fa2..226ad34 100644
 +    }
 +    pb_list_foot(f, current, count);
 +    // The gaps between cards still scroll the list (a contact anywhere on it begins the carousel).
-+    s.hits[s.hit_count++] = (hit_t){{40, 86, 386, 310}, pick, current, s.connected};
++    if (current >= 0) s.hits[s.hit_count++] = (hit_t){{40, 86, 386, 310}, pick, map ? map[current] : current, s.connected};
 +}
-+static void pb_list_compact(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, action_kind_t pick)
++static void pb_list_compact(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map, action_kind_t pick)
 +{
 +    enum { ROW = 58, BAND_X = 64, BAND_W = 338, BAND_H = 54 };
 +    int current = ht_tab_carousel_index(c);
@@ -2829,8 +2944,9 @@ index f3c3fa2..226ad34 100644
 +        if (i < 0 || i >= count) continue;
 +        int d = (i * HT_TAB_PITCH - c->position) * ROW / HT_TAB_PITCH, cy = 233 + d;
 +        if (cy - ROW / 2 < 84 || cy + ROW / 2 > 392) continue;
++        int ri = map ? map[i] : i;
 +        pb_row_t r;
-+        pb_row(i, tabs, &r);
++        pb_row(ri, tabs, &r);
 +        bool mid = abs(d) < ROW / 2;
 +        int l, rr;
 +        focus_chord(cy, 2, &l, &rr);
@@ -2838,7 +2954,7 @@ index f3c3fa2..226ad34 100644
 +        const ht_font_t *nf = &ht_lv_inter_28.base, *sf = &ht_lv_inter_20.base;
 +        uint16_t bg = mid ? color(0x1c1e26) : BG;
 +        int hit = s.hit_count++;
-+        s.hits[hit] = (hit_t){{BAND_X, cy - ROW / 2, BAND_W, ROW}, pick, i, s.connected};
++        s.hits[hit] = (hit_t){{BAND_X, cy - ROW / 2, BAND_W, ROW}, pick, ri, s.connected};
 +        pb_dot(f, x0 + 6, cy, mid ? 7 : 6, r.dot ? r.dot : 0x3a3a42);
 +        // On the right: a pane's time ("1:23") or "Reply ready" dot only; a tab's count or "N working".
 +        char right[24] = "";
@@ -2846,7 +2962,7 @@ index f3c3fa2..226ad34 100644
 +        if (tabs) {
 +            const char *dot = strstr(r.extra, "\xc2\xb7");
 +            if (dot && r.extra_ink == PB_INK_BUSY) { snprintf(right, sizeof right, "%s", dot + 4); right_ink = PB_INK_BUSY; }
-+            else snprintf(right, sizeof right, "%d", tabs ? (r.current ? s.count : s.tabs[i].panes) : 0);
++            else snprintf(right, sizeof right, "%d", tabs ? (r.current ? s.count : s.tabs[ri].panes) : 0);
 +        } else if (r.sub_ink == PB_INK_BUSY) {
 +            const char *t = strstr(r.sub, "\xc2\xb7 ");
 +            snprintf(right, sizeof right, "%s", t ? t + 3 : "");
@@ -2859,9 +2975,9 @@ index f3c3fa2..226ad34 100644
 +        pb_line(f, x0 + 22, cy - nf->height / 2, x1 - (rw ? rw + 14 : 0) - (x0 + 22), nf, ink, bg, r.name);
 +    }
 +    pb_list_foot(f, current, count);
-+    s.hits[s.hit_count++] = (hit_t){{40, 86, 386, 306}, pick, current, s.connected};
++    if (current >= 0) s.hits[s.hit_count++] = (hit_t){{40, 86, 386, 306}, pick, map ? map[current] : current, s.connected};
 +}
-+static void pb_list_dial(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, action_kind_t pick)
++static void pb_list_dial(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map, action_kind_t pick)
 +{
 +    enum { RING_R = 223, RING_W = 6, CHOSEN_W = 12, GAP = 4, RING_MAX = 24 };
 +    const int c16 = HT_WIDTH * 8;
@@ -2872,15 +2988,16 @@ index f3c3fa2..226ad34 100644
 +        int from = i * 360 / n, to = (i + 1) * 360 / n, half = (to - from - (n > 1 ? GAP : 0)) / 2;
 +        int mid = 90 - (from + to) / 2;
 +        pb_row_t r;
-+        pb_row(i, tabs, &r);
++        pb_row(map ? map[i] : i, tabs, &r);
 +        bool chosen = i == current;
 +        unsigned ink = r.dot == PB_INK_BUSY || r.dot == PB_INK_UNREAD ? r.dot : chosen ? HT_THEME_VOICE : PB_INK_IDLE;
 +        if (chosen && !s.connected) ink = HT_THEME_SECONDARY;
 +        ht_ring_arc(f, c16, c16, (chosen ? RING_R - 3 : RING_R) * 16, (chosen ? CHOSEN_W : RING_W) * 16,
 +                    (mid % 360 + 360) % 360, half < 1 ? 1 : half, color(ink));
 +    }
++    if (current < 0) return;
 +    pb_row_t r;
-+    pb_row(current, tabs, &r);
++    pb_row(map ? map[current] : current, tabs, &r);
 +    // The name, on one or two Inter 44 lines in the middle, then its status and "Tap to open".
 +    const ht_font_t *big = &ht_lv_inter_44.base, *sf = &ht_lv_inter_25.base, *hint = &ht_lv_inter_20.base;
 +    char one[HT_TEXT_BYTES], two[HT_TEXT_BYTES], fit[HT_TEXT_BYTES];
@@ -2900,31 +3017,57 @@ index f3c3fa2..226ad34 100644
 +    pb_line(f, x + dot, sy, sw, sf, r.sub_ink, BG, r.sub);
 +    if (ew) pb_line(f, x + dot + sw, sy, ew, sf, r.extra_ink, BG, r.extra);
 +    char where[40];
-+    snprintf(where, sizeof where, "%s  \xc2\xb7  %d of %d", tabs ? "Tap to switch" : "Tap to open", current + 1, count);
++    snprintf(where, sizeof where, "%s  \xc2\xb7  %d of %d", tabs && pick == A_TAB ? "Tap to switch" : "Tap to open",
++             current + 1, count);
 +    focus_centred(f, 362, 260, hint, color(0x585863), BG, where);
-+    s.hits[s.hit_count++] = (hit_t){{40, 100, 386, 300}, pick, current, s.connected};
++    s.hits[s.hit_count++] = (hit_t){{40, 100, 386, 300}, pick, map ? map[current] : current, s.connected};
 +}
-+static void pb_styled_list(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs)
++static void pb_styled_list(ht_scene_t *f, const ht_tab_carousel_t *c, int count, bool tabs, const int *map,
++                           action_kind_t pick)
 +{
-+    action_kind_t pick = tabs ? A_TAB : A_AGENT;
 +    switch (pb_lists()) {
-+    case PB_LISTS_CARDS: pb_list_cards(f, c, count, tabs, pick); break;
-+    case PB_LISTS_DIAL: pb_list_dial(f, c, count, tabs, pick); break;
-+    default: pb_list_compact(f, c, count, tabs, pick); break;
++    case PB_LISTS_CARDS: pb_list_cards(f, c, count, tabs, map, pick); break;
++    case PB_LISTS_DIAL: pb_list_dial(f, c, count, tabs, map, pick); break;
++    default: pb_list_compact(f, c, count, tabs, map, pick); break;
 +    }
++}
++// The Claude Code groups: the tabs whose id starts "code" (Puck Bridge's code-<hash>), in the host's order.
++static int pb_groups(int *idx)
++{
++    int n = 0;
++    for (int i = 0; i < s.tab_count; i++) if (!strncmp(s.tabs[i].id, "code", 4)) idx[n++] = i;
++    return n;
++}
++static void render_groups(ht_scene_t *f)
++{
++    focus_header(f, "CLAUDE CODE");
++    int idx[SWARMS_MAX], n = pb_groups(idx);
++    if (!n) {
++        focus_put(f, 40, 196, HT_WIDTH - 80, &ht_lv_inter_30.base, FG, BG, "No Claude Code groups", true);
++        focus_put(f, 50, 244, HT_WIDTH - 100, &ht_lv_inter_20.base, color(0x8a8a99), BG,
++                  "Open Claude's Code view once", true);
++        focus_put(f, 40, 372, HT_WIDTH - 80, &ht_lv_inter_20.base, color(0x6a6a76), BG, "Swipe left for chats", true);
++        return;
++    }
++    if (group_carousel.count != n) {
++        int at = 0;
++        for (int k = 0; k < n; k++) if (!strcmp(s.tabs[idx[k]].id, s.selected_tab)) at = k;
++        ht_tab_carousel_reset(&group_carousel, n, at);
++    }
++    pb_styled_list(f, &group_carousel, n, true, idx, A_GROUP);
 +}
  static void render_tabs(ht_scene_t *f)
  {
 +    if (pb_tabs() || (pb.host && character.id == HT_CHARACTER_FOCUS && !s.tab_count)) { render_pb_tabs(f); return; }
 +    if (pb_lists() && ht_tab_carousel_index(&tab_carousel) >= 0) {
 +        focus_header(f, "TABS");
-+        pb_styled_list(f, &tab_carousel, s.tab_count, true);
++        pb_styled_list(f, &tab_carousel, s.tab_count, true, NULL, A_TAB);
 +        return;
 +    }
      // Done is shared by every face, with the same generous bottom-edge target; green on Focus (design 2026-10-06).
      ht_text(f, (HT_WIDTH-ht_done_28.width)/2, 400, ht_done_28.width, &ht_done_28,
              character.id == HT_CHARACTER_FOCUS ? color(HT_THEME_VOICE) : FG, BG, HT_DONE);
-@@ -2047,6 +2461,382 @@ static void render_draft_options(ht_scene_t *f)
+@@ -2047,6 +2515,422 @@ static void render_draft_options(ht_scene_t *f)
      control(f, FACE_CX(336), 323, 336, "Back to draft", A_DRAFT_BACK, 0, true);
      center(f, 380, draft.page.locked ? "Check terminal" : "Nothing sent yet", DIM);
  }
@@ -2973,6 +3116,7 @@ index f3c3fa2..226ad34 100644
 +#define PB_INK_DOT 0x4c4c55u
 +static void pb_dots(ht_scene_t *f, int page, int cx, int y)
 +{
++    if (pb_nav()) return;   // pb 5: no row of side pages any more (the clock is a crossroads, not a page)
 +    int panes = s.count < PB_DOTS_PANES ? s.count : PB_DOTS_PANES, n = 2 + panes;
 +    bool more = s.count > PB_DOTS_PANES;
 +    enum { PITCH = 16, ON = 8, OFF = 6 };
@@ -3114,7 +3258,43 @@ index f3c3fa2..226ad34 100644
 +    int last = pb.count > TAB_ROWS ? pb.count - TAB_ROWS : 0;
 +    if (s.offset > last) s.offset = last;
 +    if (s.offset < 0) s.offset = 0;
-+    for (int row = 0; row < TAB_ROWS && s.offset + row < pb.count && s.hit_count < 24; row++) {
++    for (int row = 0; pb_nav() && row < TAB_ROWS && s.offset + row < pb.count && s.hit_count < 24; row++) {
++        /*
++         * PUCK BRIDGE'S SETTINGS AS CARDS (pb 5, owner: "make settings ui a lot better"): each row a rounded card,
++         * its name on the left in white, its value on the right in grey with a "›" when a picker is behind it, and an
++         * On/Off row drawn as a switch (green and knob right when on). Same rows, offsets and taps as before.
++         */
++        enum { X = 61, W = 344, H = 56 };
++        int i = s.offset + row, y = TAB_TOP + row * TAB_ROW_HEIGHT + (TAB_ROW_HEIGHT - H) / 2, hit = s.hit_count++;
++        s.hits[hit] = (hit_t){{LIST_HIT_X, y - 4, LIST_HIT_W, H + 8}, A_PBMENU_TAP, i, s.connected};
++        bool down = hit == s.pressed;
++        uint16_t fill = color(down ? 0x30333f : 0x16171c);
++        ht_box(f, X, y, W, H, H / 2, fill, color(0x2a2c33));
++        char label[PB_TEXT], value[PB_TEXT + 4];
++        pb_clean(label, sizeof label, pb.item[i].label[0] ? pb.item[i].label : pb.item[i].id, mid);
++        pb_clean(value, PB_TEXT, pb.item[i].value, mid);
++        bool on = !strcmp(value, "On"), toggle = !pb.item[i].choices && (on || !strcmp(value, "Off"));
++        int right = X + W - 22, vw = 0;
++        if (toggle) {
++            enum { SW = 50, SH = 30, KNOB = 24 };
++            int sx = right - SW, sy = y + (H - SH) / 2;
++            ht_box(f, sx, sy, SW, SH, SH / 2, color(on ? 0x30c75a : 0x3a3a42), color(on ? 0x30c75a : 0x3a3a42));
++            int kx = on ? sx + SW - KNOB - 3 : sx + 3;
++            ht_box(f, kx, sy + 3, KNOB, KNOB, KNOB / 2, color(on ? 0xffffff : 0xa8a8b0), color(on ? 0xffffff : 0xa8a8b0));
++            vw = SW;
++        } else {
++            if (pb.item[i].choices) strcat(value, " \xe2\x80\xba");   // " ›"
++            char fit[HT_TEXT_BYTES];
++            vw = ht_fit_width(fit, sizeof fit, value, 150, mid);
++            if (vw > 0) ht_text(f, right - vw, y + (H - mid->height) / 2, vw, mid,
++                                color(!s.connected ? HT_THEME_SECONDARY : down ? HT_THEME_VOICE : 0x9a9aa6), fill, fit);
++            else vw = 0;
++        }
++        char fit[HT_TEXT_BYTES];
++        int lw = ht_fit_width(fit, sizeof fit, label, right - vw - 14 - (X + 24), mid);
++        if (lw > 0) ht_text(f, X + 24, y + (H - mid->height) / 2, lw, mid, !s.connected ? DIM : FG, fill, fit);
++    }
++    for (int row = 0; !pb_nav() && row < TAB_ROWS && s.offset + row < pb.count && s.hit_count < 24; row++) {
 +        int i = s.offset + row, y = TAB_TOP + row * TAB_ROW_HEIGHT, hit = s.hit_count++;
 +        s.hits[hit] = (hit_t){{LIST_HIT_X, y, LIST_HIT_W, TAB_ROW_HEIGHT}, A_PBMENU_TAP, i, s.connected};
 +        bool down = hit == s.pressed;
@@ -3131,8 +3311,11 @@ index f3c3fa2..226ad34 100644
 +        char where[32];
 +        int end = s.offset + TAB_ROWS < pb.count ? s.offset + TAB_ROWS : pb.count;
 +        snprintf(where, sizeof where, "%d\xe2\x80\x93%d of %d", s.offset + 1, end, pb.count);
-+        focus_put(f, 40, 392, HT_WIDTH - 80, small, color(0x8a8a99), BG, where, true);
++        focus_put(f, 40, pb_nav() ? 380 : 392, HT_WIDTH - 80, small, color(pb_nav() ? 0x585863 : 0x8a8a99), BG, where,
++                  true);
 +    }
++    if (pb_nav() && s.offset == 0)   // pb 5: the way back is the way it came
++        focus_put(f, 60, 408, HT_WIDTH - 120, small, color(0x4c4c55), BG, "Swipe down to close", true);
 +}
 +/*
 + * PUCK BRIDGE'S PLAIN SCREENS (pb 4), in the clock's and the settings' type: a letter-spaced header, the words
@@ -3307,7 +3490,7 @@ index f3c3fa2..226ad34 100644
  static void render_settings(ht_scene_t *f)
  {
      heading(f, "controls");
-@@ -2160,6 +2950,7 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2160,6 +3044,7 @@ bool habitat_scene_take(ht_scene_t *f)
          break;
      }
      case STOP:
@@ -3315,7 +3498,7 @@ index f3c3fa2..226ad34 100644
          heading(f, "stop this turn?");
          center(f, 185, "Your work stays.", FG);
          center(f, 227, "This turn stops.", DIM);
-@@ -2183,7 +2974,20 @@ bool habitat_scene_take(ht_scene_t *f)
+@@ -2183,7 +3068,23 @@ bool habitat_scene_take(ht_scene_t *f)
      case OTA:
          render_brand(f);
          break;
@@ -3324,6 +3507,9 @@ index f3c3fa2..226ad34 100644
 +        break;
 +    case PBMENU:
 +        render_pbmenu(f);
++        break;
++    case GROUPS:
++        render_groups(f);
 +        break;
 +    case PICKER:
 +        render_picker(f);
@@ -3336,7 +3522,16 @@ index f3c3fa2..226ad34 100644
          heading(f, s.title);
          ui_wrap(f, FACE_CX(336), 161, 336, 5, 0, UI_FONT, FG, s.message);
          break;
-@@ -2415,6 +3219,10 @@ static void dispatch(action_t a)
+@@ -2290,7 +3191,7 @@ static action_t make_action(hit_t h)
+         COPY(a.id, s.agents[h.value].id);
+     else if (h.action == A_NOTICE && h.value < s.notice_count)
+         COPY(a.id, s.notice[h.value].agent_id);
+-    else if (h.action == A_TAB && h.value < s.tab_count)
++    else if ((h.action == A_TAB || h.action == A_GROUP) && h.value < s.tab_count)
+         COPY(a.id, s.tabs[h.value].id);
+     else if (h.action == A_MACHINE && h.value < s.machine_count)
+         COPY(a.id, s.machines[h.value].id);
+@@ -2415,6 +3316,10 @@ static void dispatch(action_t a)
          }
          break;
      case A_HOME:
@@ -3347,7 +3542,7 @@ index f3c3fa2..226ad34 100644
          if (workspace.phase!=HT_WORKSPACE_IDLE) {
              ht_workspace_cancel_request(&workspace); s.loading=false; s.active=-1;
          }
-@@ -2537,6 +3345,10 @@ static void dispatch(action_t a)
+@@ -2537,6 +3442,10 @@ static void dispatch(action_t a)
          view(MACHINES);
          break;
      case A_TAB:
@@ -3358,7 +3553,7 @@ index f3c3fa2..226ad34 100644
          if (s.view==TABS && workspace_index(a.id)>=0)
              ht_tab_carousel_reset(&tab_carousel,s.tab_count,workspace_index(a.id));
          tab_request(a.id,s.view==TABS);
-@@ -2738,7 +3550,7 @@ static void dispatch(action_t a)
+@@ -2738,7 +3647,7 @@ static void dispatch(action_t a)
          if (s.connected && find(s.stop_agent) >= 0 && s.agents[find(s.stop_agent)].busy) {
              COPY(a.id, s.stop_agent);
              queue(a);
@@ -3367,10 +3562,36 @@ index f3c3fa2..226ad34 100644
          }
          break;
      case A_MODELS:
-@@ -2779,6 +3591,57 @@ static void dispatch(action_t a)
+@@ -2779,6 +3688,83 @@ static void dispatch(action_t a)
          break;
      case A_SETTINGS_SAVE:
          break;   // the worker's alone: it is queued, never dispatched from a hit rect
++    case A_PB_INBOX:
++        view(INBOX);
++        break;
++    case A_PB_GROUPS: {
++        view(GROUPS);
++        int idx[SWARMS_MAX], n = pb_groups(idx), at = 0;
++        for (int k = 0; k < n; k++) if (!strcmp(s.tabs[idx[k]].id, s.selected_tab)) at = k;
++        ht_tab_carousel_reset(&group_carousel, n, at);
++        break;
++    }
++    case A_GROUP:
++    case A_PB_CHATS: {
++        // A group's list, or the chats': at once when it is the tab on the face, else after the tab handshake lands
++        // (ui_land_after_reload), with "Opening…" on its card meanwhile.
++        const char *id = a.kind == A_PB_CHATS ? "chats" : a.id;
++        if (workspace_index(id) < 0) break;
++        if (!strcmp(id, s.selected_tab) && workspace.phase == HT_WORKSPACE_IDLE && !s.loading) {
++            pb.land_list = false;
++            dispatch((action_t){.kind = A_AGENTS});
++            if (s.count) ht_tab_carousel_reset(&pane_carousel, s.count, 0);
++        } else {
++            pb.land_list = true;
++            tab_request(id, true);
++        }
++        break;
++    }
 +    case A_PBMENU_OPEN:
 +        // The clock's [ settings ]: the list is the Mac's, so it is asked for every time it opens.
 +        pb.count = s.connected ? -1 : -2;
@@ -3425,7 +3646,7 @@ index f3c3fa2..226ad34 100644
      case A_QUESTION_READ:
      case A_NOTICE_READ:
      case A_TAB_REFRESH:
-@@ -2890,6 +3753,21 @@ static void worker(void *unused)
+@@ -2890,6 +3876,21 @@ static void worker(void *unused)
          case A_STOP_YES:
              cable_client_stop_turn(a.id);
              break;
@@ -3447,7 +3668,7 @@ index f3c3fa2..226ad34 100644
          case A_MODEL: {
              const char *p = strrchr(a.text, ':');
              char model[128];
-@@ -2958,6 +3836,29 @@ static void worker(void *unused)
+@@ -2958,6 +3959,29 @@ static void worker(void *unused)
          }
      }
  }
@@ -3477,7 +3698,7 @@ index f3c3fa2..226ad34 100644
  void habitat_touch(bool down, int x, int y, uint32_t now)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -2969,6 +3870,57 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2969,6 +3993,69 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
  #endif
      if (!s.ready)
          return;
@@ -3516,7 +3737,19 @@ index f3c3fa2..226ad34 100644
 +            ht_gesture_end(&gesture, x, y, now);
 +            int dx = x - s.start_x, dy = y - s.start_y;
 +            bool sideways = gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy);
++            bool upright = gesture.axis == 1 && abs(dy) > 60 && abs(dy) > abs(dx);
 +            action_t a = {.kind = A_HOME};
++            if (pb_nav() && (sideways || upright)) {
++                // pb 5: down the notifications, up the settings, left the groups (the chats when there are none).
++                int idx[SWARMS_MAX];
++                if (upright) a.kind = dy > 0 ? A_PB_INBOX : A_PBMENU_OPEN;
++                else if (dx < 0) a.kind = pb_groups(idx) ? A_PB_GROUPS : A_PB_CHATS;
++                ESP_LOGI("habitat", "clock swipe %d,%d: %s", dx, dy, a.kind == A_PB_INBOX ? "notifications" :
++                         a.kind == A_PBMENU_OPEN ? "settings" : a.kind == A_HOME ? "face" : "lists");
++                dispatch(a);
++                s.touch_down = down; s.last_x = x; s.last_y = y;
++                return;
++            }
 +            if (sideways && dx > 0) a.kind = A_PBMENU_OPEN;
 +            else if (sideways && (s.active < 0 || s.active >= s.count) && s.count) {
 +                a.kind = A_AGENT;
@@ -3535,7 +3768,7 @@ index f3c3fa2..226ad34 100644
      bool surface = s.view == HOME || s.view == AGENT;
      if (s.touch_down && !s.touch_cancelled) {
          // Classify this sample before the hold deadline. A delayed MOVE/UP
-@@ -2990,6 +3942,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -2990,6 +4077,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          s.draft_drag = 0;
          s.tab_drag = 0;
          s.pressed = -1;
@@ -3543,7 +3776,7 @@ index f3c3fa2..226ad34 100644
          pressed_action = make_action((hit_t){.action = A_NONE});
          for (int i = 0; i < s.hit_count; i++) {
              hit_t h = s.hits[i];
-@@ -3002,9 +3955,10 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3002,9 +4090,12 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          }
          if (surface && pressed_action.kind==A_TABS && !s.touch_brake)
              ht_workspace_touch(&workspace,workspace_index(s.selected_tab),s.tab_count,x,y,now);
@@ -3553,10 +3786,12 @@ index f3c3fa2..226ad34 100644
          if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_AGENT)
 -            ht_tab_carousel_begin(&pane_carousel, x, now);
 +            ht_tab_carousel_begin(&pane_carousel, pb_lists_pos(x, y), now);
++        if (s.view == GROUPS && pressed_action.kind == A_GROUP)
++            ht_tab_carousel_begin(&group_carousel, pb_lists_pos(x, y), now);
          if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && pressed_action.kind == A_NOTICE)
              ht_tab_carousel_begin(&inbox_carousel, x, now);
          ht_gesture_begin(&gesture, x, y, now, ((uint32_t)s.view << 8) | pressed_action.kind);
-@@ -3026,15 +3980,16 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3026,15 +4117,19 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
          ht_gesture_move(&gesture, x, y);
          if (surface && home_footer(pressed_action.kind)) {
              if (pressed_action.kind==A_TABS && ht_workspace_move(&workspace,x,y,gesture.axis,now)) change();
@@ -3570,6 +3805,9 @@ index f3c3fa2..226ad34 100644
 -            if (gesture.axis == 2 && ht_tab_carousel_move(&pane_carousel, x, now)) change();
 +            if (gesture.axis == pb_lists_axis() && ht_tab_carousel_move(&pane_carousel, pb_lists_pos(x, y), now))
 +                change();
++        } else if (s.view == GROUPS) {
++            if (gesture.axis == 1 && group_carousel.touching &&
++                ht_tab_carousel_move(&group_carousel, pb_lists_pos(x, y), now)) change();
          } else if (s.view == INBOX && character.id == HT_CHARACTER_FOCUS && inbox_carousel.touching) {
              if (gesture.axis == 2 && ht_tab_carousel_move(&inbox_carousel, x, now)) change();
 -        } else if ((s.view == AGENTS || s.view == SETTINGS) && gesture.axis == 1) {
@@ -3577,13 +3815,16 @@ index f3c3fa2..226ad34 100644
              tabs_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
          } else if (s.view == DRAFT && gesture.axis == 1) {
              draft_move((s.last_y - y) * (scroll_reversed ? -1 : 1), now);
-@@ -3055,15 +4010,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3055,15 +4150,21 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
      if (!down && s.touch_down) {
          ht_touch_result_t result = ht_gesture_end(&gesture, x, y, now);
          bool pane_contact = s.view == AGENTS && character.id == HT_CHARACTER_FOCUS && pane_carousel.touching;
 -        bool pane_tap = pane_contact && ht_tab_carousel_end(&pane_carousel, x, gesture.axis == 2, now);
 +        bool pane_tap = pane_contact &&
 +            ht_tab_carousel_end(&pane_carousel, pb_lists_pos(x, y), gesture.axis == pb_lists_axis(), now);
++        bool group_contact = s.view == GROUPS && group_carousel.touching;
++        bool group_tap = group_contact &&
++            ht_tab_carousel_end(&group_carousel, pb_lists_pos(x, y), gesture.axis == 1, now);
          bool notice_contact = s.view == INBOX && character.id == HT_CHARACTER_FOCUS && inbox_carousel.touching;
          bool notice_tap = notice_contact && ht_tab_carousel_end(&inbox_carousel, x, gesture.axis == 2, now);
          if (s.view == AGENTS && character.id == HT_CHARACTER_FOCUS) {
@@ -3599,7 +3840,37 @@ index f3c3fa2..226ad34 100644
          bool scrolled = ht_scroll_end(&scroll, x, y, now);
          if (scrolled) {
              uint32_t coast = ht_scroll_coast_ms(scroll.velocity);
-@@ -3101,6 +4059,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3072,8 +4173,29 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+         }
+         int dx = x - s.start_x, dy = y - s.start_y;
+         s.pressed = -1;
++        bool nav_side = pb_nav() && gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy);
++        bool nav_up = pb_nav() && gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx);
+         if (scrolled || s.touch_cancelled) {
+             // Motion owns this entire contact, even if it returns to its start.
++        } else if (nav_side && (s.view == GROUPS || s.view == AGENTS || s.view == TABS)) {
++            // pb 5: right goes back (a list to the groups, the groups to the clock, the tabs to the face); left on the
++            // groups is the chats.
++            ESP_LOGI("habitat", "list swipe %d px on %s", dx, s.view == GROUPS ? "groups" : s.view == AGENTS ? "list" :
++                     "tabs");
++            if (s.view == GROUPS && dx > 0) view(CLOCK);
++            else if (s.view == GROUPS) dispatch((action_t){.kind = A_PB_CHATS});
++            else if (s.view == AGENTS && dx > 0) dispatch((action_t){.kind = A_PB_GROUPS});
++            else if (s.view == TABS && dx > 0) view(HOME);
++            if (s.view == GROUPS || s.view == AGENTS) change();
++        } else if (nav_up && s.view == INBOX && dy < 0) {
++            view(CLOCK);   // pb 5: the notifications came down from the clock; up goes back
++        } else if (nav_up && s.view == PBMENU && dy > 0 && pb.press_offset == 0 && s.offset == 0) {
++            view(CLOCK);   // pb 5: the settings came up from the clock; down at the top goes back
++        } else if (group_contact) {
++            int index = pressed_action.value;
++            if (group_tap && result == HT_TOUCH_TAP && pressed_action.kind == A_GROUP && index >= 0 &&
++                index < s.tab_count && !strcmp(pressed_action.id, s.tabs[index].id)) dispatch(pressed_action);
++            change();
+         } else if (tab_contact) {
+             int index = pressed_action.value;
+             if (tab_tap && result == HT_TOUCH_TAP && pressed_action.kind == A_TAB && index >= 0 &&
+@@ -3101,6 +4223,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
              change();
          } else if (result == HT_TOUCH_TAP && s.touch_brake) {
              // DOWN already stopped desktop inertia. This entire tap is only a brake.
@@ -3618,7 +3889,7 @@ index f3c3fa2..226ad34 100644
          } else if (surface && pressed_action.kind==A_TABS) {
              bool cancelled=workspace.cancelled || (workspace.touching && now-workspace.began>=5000);
              int chosen=ht_workspace_release(&workspace,x,y,gesture.axis,now);
-@@ -3178,7 +4148,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3178,7 +4312,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  dispatch(pressed_action);
              }
          } else if (gesture.axis == 1 && abs(dy) > 55 && abs(dy) > abs(dx)) {
@@ -3627,7 +3898,7 @@ index f3c3fa2..226ad34 100644
                  // The list consumed the drag already, including its final sample.
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  // Reading a draft never submits or starts recording.
-@@ -3193,6 +4163,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3193,6 +4327,11 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
                  // is the gesture the rest of the world already means by it.
                  view(INBOX);
@@ -3639,7 +3910,7 @@ index f3c3fa2..226ad34 100644
              } else if (surface) {
                  // A congested scroll queue cannot turn a scroll into navigation or voice.
              } else if (s.start_y >= 400 && dy < 0)
-@@ -3213,8 +4188,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3213,8 +4352,20 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (next >= 0 && next < count) s.offset = next;
              }
          } else if (gesture.axis == 2 && abs(dx) > 60 && abs(dx) > abs(dy)) {
@@ -3661,7 +3932,7 @@ index f3c3fa2..226ad34 100644
              } else if (s.view == DRAFT || s.view == DRAFT_OPTIONS) {
                  if (dx > 0) {
                      action_t a = make_action((hit_t){.action = s.view == DRAFT ? A_DRAFT_OPTIONS : A_DRAFT_BACK});
-@@ -3226,7 +4213,23 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
+@@ -3226,7 +4377,30 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                  if (dx>0 && !s.q.pending) view(s.view==ANSWER_REVIEW ? CHOICE : s.view==CHOICE ? QUESTION : HOME);
              } else if (s.view == INBOX && s.notice_count)
                  s.offset = (s.offset + (dx < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
@@ -3674,9 +3945,16 @@ index f3c3fa2..226ad34 100644
 +                 */
 +                int at = s.active >= 0 && s.active < s.count ? s.active : -1;
 +                int i = dx > 0 ? at - 1 : at + 1;
++                if (pb_nav() && dx > 0) {   // pb 5: right goes back, to the list this pane is on
++                    ESP_LOGI("habitat", "face swipe %d px: back to the list", dx);
++                    dispatch((action_t){.kind = A_AGENTS});
++                    i = -2;   // handled
++                }
 +                ESP_LOGI("habitat", "face swipe %d px: pane %d -> %s", dx, at, dx > 0 && at <= 0 ? "clock" :
 +                         i >= s.count ? "end" : "pane");
-+                if (dx > 0 && at <= 0) view(CLOCK);
++                if (i == -2) {
++                    // back to the list, above
++                } else if (dx > 0 && at <= 0) view(CLOCK);
 +                else if (i >= 0 && i < s.count) {
 +                    action_t a = {.kind = A_AGENT};
 +                    COPY(a.id, s.agents[i].id);
@@ -3686,7 +3964,15 @@ index f3c3fa2..226ad34 100644
                  int i = s.active < 0 ? 0 : (s.active + (dx < 0 ? 1 : s.count - 1)) % s.count;
                  action_t a = {.kind = A_AGENT};
                  COPY(a.id, s.agents[i].id);
-@@ -3276,6 +4279,21 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3265,6 +4439,7 @@ uint32_t habitat_next_wake_ms(void)
+         delay = 125;
+     if (s.view == TABS && tab_carousel.animating && !display_is_asleep()) delay = 16;
+     if (s.view == AGENTS && pane_carousel.animating && !display_is_asleep()) delay = 16;
++    if (s.view == GROUPS && group_carousel.animating && !display_is_asleep()) delay = 16;
+     if (s.view == INBOX && inbox_carousel.animating && !display_is_asleep()) delay = 16;
+     if (selection.pending && delay > 100) delay = 100;
+     if (visit.pending && delay > 100) delay = 100;
+@@ -3276,6 +4451,21 @@ uint32_t habitat_next_wake_ms(void)
          uint32_t due = status_wake_ms(now);
          if (due < delay) delay = due;
      }
@@ -3708,7 +3994,7 @@ index f3c3fa2..226ad34 100644
      if (s.pet_next_ms && (((s.view == HOME || s.view == AGENT) && !s.touch_down) || s.view == VOICE)) {
          int32_t left = (int32_t)(s.pet_next_ms - now);
          uint32_t due = left < 1 ? 1 : (uint32_t)left;
-@@ -3300,6 +4318,141 @@ uint32_t habitat_next_wake_ms(void)
+@@ -3300,6 +4490,141 @@ uint32_t habitat_next_wake_ms(void)
          }
      return delay;
  }
@@ -3850,7 +4136,7 @@ index f3c3fa2..226ad34 100644
  void habitat_tick(void)
  {
  #ifdef DEVICE_CREATURE_GALLERY
-@@ -3314,6 +4467,9 @@ void habitat_tick(void)
+@@ -3314,6 +4639,9 @@ void habitat_tick(void)
          change();
      }
      surface_tick(now);
@@ -3860,7 +4146,7 @@ index f3c3fa2..226ad34 100644
      if (ht_workspace_tick(&workspace,now)) workspace_failed("The tab did not open. Choose it again.");
      if ((s.q.loading || (s.q.pending && !s.q.uncertain)) && (int32_t)(now-s.q.deadline)>=0) {
          if (s.q.loading) { s.q.loading=false; COPY(s.q.error,"Question did not arrive. Open the alert again."); }
-@@ -3375,7 +4531,10 @@ void habitat_tick(void)
+@@ -3375,7 +4703,10 @@ void habitat_tick(void)
              } else if (s.view == DRAFT) {
                  COPY(draft.page.error, "No voice reply. Checking your draft."); change();
              } else {
@@ -3872,7 +4158,7 @@ index f3c3fa2..226ad34 100644
              }
          }
      }
-@@ -3601,6 +4760,7 @@ void ui_set_connected(bool value)
+@@ -3601,6 +4932,7 @@ void ui_set_connected(bool value)
          if (question_view(s.view)) view(HOME);
          ht_visit_close(&visit);
          ht_carry_close(&carry);
@@ -3880,7 +4166,7 @@ index f3c3fa2..226ad34 100644
      }
      s.connected = value;
      if (!value && form.id[0]) { ht_form_reset(&form); view(HOME); }
-@@ -3644,6 +4804,16 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
+@@ -3644,6 +4976,27 @@ void ui_project_set_machine(const char *id, const char *machine_id, const char *
      }
      display_unlock();
  }
@@ -3894,23 +4180,40 @@ index f3c3fa2..226ad34 100644
 +    }
 +    display_unlock();
 +}
++void ui_project_set_status(const char *id, const char *status, const char *tone)
++{
++    display_lock();
++    int i = find(id);
++    if (i >= 0 && (strcmp(s.agents[i].status, status ? status : "") || strcmp(s.agents[i].tone, tone ? tone : ""))) {
++        COPY(s.agents[i].status, status);
++        COPY(s.agents[i].tone, tone);
++        change();
++    }
++    display_unlock();
++}
  void ui_project_fill_missing_engine(const char *engine)
  {
      display_lock();
-@@ -4007,8 +5177,11 @@ void ui_land_after_reload(void)
+@@ -4007,8 +5360,16 @@ void ui_land_after_reload(void)
      if (s.loading && (workspace.phase==HT_WORKSPACE_IDLE || workspace.phase==HT_WORKSPACE_READY)) {
          ht_workspace_cancel_request(&workspace);
          s.loading = false;
 -        if (s.view != TABS) view(HOME);
+-    }
 +        // The clock stays up through a list that lands under it (pb 3: the first ambient often beats the list).
-+        if ((s.view != TABS || pb_tabs()) && s.view != CLOCK && s.view != TIMER) view(HOME);
-     }
++        if (pb.land_list && s.view == GROUPS) {
++            // pb 5: a group (or the chats) chosen on the groups list opens on its list, the first row chosen.
++            view(AGENTS);
++            ht_tab_carousel_reset(&pane_carousel, s.count, 0);
++        } else if ((s.view != TABS || pb_tabs()) && s.view != CLOCK && s.view != TIMER) view(HOME);
++        pb.land_list = false;
++    }
 +    // Puck Bridge's face always has a pane on it once there is one (never "Choose a pane"; pb 3).
 +    if (pb.host && (s.active < 0 || s.active >= s.count) && s.count > 0) s.active = 0;
      change();
      display_unlock();
  }
-@@ -4046,7 +5219,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
+@@ -4046,7 +5407,8 @@ bool ui_picker_is_open(void) { return s.view == MODELS || s.view == MACHINES ||
  bool ui_switch_is_open(void) { return s.view == TABS; }
  bool ui_scroll_reportable(void)
  {
@@ -3920,7 +4223,7 @@ index f3c3fa2..226ad34 100644
             !display_is_asleep() && !s.voice_open && !audio_client_active();
  }
  int ui_notif_pull_zone_px(void) { return 0; }
-@@ -4864,7 +6038,7 @@ void ui_cable_toast(const char *message)
+@@ -4864,7 +6226,7 @@ void ui_cable_toast(const char *message)
          return;
      }
      display_unlock();
@@ -3929,7 +4232,7 @@ index f3c3fa2..226ad34 100644
  }
  void ui_voice_error(const char *message)
  {
-@@ -5016,16 +6190,187 @@ void ui_stop_active_turn(void)
+@@ -5016,16 +6378,197 @@ void ui_stop_active_turn(void)
      }
      display_unlock();
  }
@@ -4033,6 +4336,16 @@ index f3c3fa2..226ad34 100644
 +    pb.host = true;
 +    display_unlock();
 +}
++void ui_pb_theme(bool light)
++{
++    display_lock();
++    if (light != ht_light_theme) {
++        ESP_LOGI("habitat", "theme %s", light ? "light" : "dark");
++        ht_light_theme = light;
++        change();
++    }
++    display_unlock();
++}
 +void ui_pb_lists(const char *style)
 +{
 +    uint8_t v = !style ? PB_LISTS_CLASSIC : !strcmp(style, "cards") ? PB_LISTS_CARDS : !strcmp(style, "dial") ?
@@ -4123,19 +4436,22 @@ index f3c3fa2..226ad34 100644
  }
  /*
 diff --git a/devices/harness-device/firmware/main/ui/ui_screens.h b/devices/harness-device/firmware/main/ui/ui_screens.h
-index 0eb5874..a149ec4 100644
+index 0eb5874..6a59436 100644
 --- a/devices/harness-device/firmware/main/ui/ui_screens.h
 +++ b/devices/harness-device/firmware/main/ui/ui_screens.h
-@@ -88,6 +88,8 @@ void ui_project_set_engine(const char *project_id, const char *engine);
+@@ -88,6 +88,11 @@ void ui_project_set_engine(const char *project_id, const char *engine);
  // Which machine an agent lives on. A tab spans machines, so this is what the tile's machine line and
  // line shows and what a machine row uses to find the first agent to land on.
  void ui_project_set_machine(const char *project_id, const char *machine_id, const char *machine);
 +// Puck Bridge (pb 3): the Claude Code session's project ("" for none), drawn small on the face and in the panes list.
 +void ui_project_set_project(const char *project_id, const char *project);
++// Puck Bridge (pb 5): a Claude Code session's status in words and its colour ("merged", "open", "closed", "draft",
++// "idle"); "" for none.
++void ui_project_set_status(const char *project_id, const char *status, const char *tone);
  
  // Fill only agents whose engine is still unknown (used when machine connected.engine arrives after list).
  void ui_project_fill_missing_engine(const char *engine);
-@@ -463,9 +465,43 @@ void ui_voice_stop(void);
+@@ -463,9 +468,45 @@ void ui_voice_stop(void);
  // call from a non-LVGL task.
  void ui_stop_active_turn(void);
  
@@ -4161,7 +4477,7 @@ index 0eb5874..a149ec4 100644
 +// A row may carry `choices` (at most UI_PB_CHOICES_MAX) and `index`, the current one: the row then opens a picker
 +// and sends `pb.menu.set` instead of `pb.menu.tap`. A choice's `pet` names an engine whose pet previews it; `builtin`
 +// draws the firmware's own pet of that engine even when a custom pack is mapped to it.
-+#define UI_PB_MENU_MAX 10
++#define UI_PB_MENU_MAX 12
 +#define UI_PB_CHOICES_MAX 16
 +// pb 3: `sound` (a pb.sound style) and/or `volume` (0-100, -1 none) make the choice a sound the picker plays.
 +typedef struct { const char *value, *pet; bool builtin; const char *sound; int volume; } ui_pb_choice_t;
@@ -4177,6 +4493,8 @@ index 0eb5874..a149ec4 100644
 +// `pb.ui` (pb 4): the list style for the panes list and the tabs — "classic" (the official pages), "cards", "dial"
 +// or "compact"; anything else is classic. Runs on the cable task.
 +void ui_pb_lists(const char *style);
++// `pb.ui {theme}` (pb 5): the light theme on or off (dark). In RAM; the host repeats it after every welcome.
++void ui_pb_theme(bool light);
 +// `pb.timer` (pb 3): start (or replace) the puck's countdown of `seconds`, 0 cancels it; `label` may be NULL.
 +void ui_pb_timer(int seconds, const char *label);
  
@@ -4579,9 +4897,9 @@ index 331dda2..cd6a4c0 100644
  harness += function('question_view') + function('copy') + function('input_cancel') + function('view') + function('voice_close') + function('workspace_failed')
  dispatch = source.split('case A_VOICE:\n', 1)[1].split('case A_PET:', 1)[0]
 diff --git a/devices/harness-device/firmware/version.txt b/devices/harness-device/firmware/version.txt
-index 0222dbe..8738c59 100644
+index 0222dbe..7166b84 100644
 --- a/devices/harness-device/firmware/version.txt
 +++ b/devices/harness-device/firmware/version.txt
 @@ -1 +1 @@
 -0.0.86
-+0.0.88-pb.5
++0.0.88-pb.6
