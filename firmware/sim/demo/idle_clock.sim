@@ -1,0 +1,11 @@
+# Idle becomes the clock (idleMin 5) and the clock holds the panel on; the ring shows the panes.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+time +301000
+expect view CLOCK
+time +600000
+state
+expect view CLOCK

@@ -1,0 +1,16 @@
+# "builtin": true draws the firmware's own pet even when a custom pack is mapped to that engine (the Mac maps its
+# custom character to "claude"); without it the custom pack draws.
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+petpack out/pet_min.hpet claude
+boot tap
+swipe 120 233 330 233 200
+in {"t":"pb.menu","title":"Settings","items":[{"id":"character","label":"Character","value":"My pet","index":1,"choices":[{"value":"Clawd","pet":"claude","builtin":true},{"value":"My pet","pet":"claude"}]}]}
+tap 233 144 120
+expect view PICKER
+shot out/picker_builtin_clawd.png
+swipe 330 200 120 200 200
+shot out/picker_custom_pack.png

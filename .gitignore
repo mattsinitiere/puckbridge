@@ -3,3 +3,4 @@ dist/
 .DS_Store
 *.p12
 firmware/out/
+firmware/sim/out/

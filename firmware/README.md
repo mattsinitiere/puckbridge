@@ -1,30 +1,58 @@
 # Puck Bridge firmware patch
 
-`patches/0001-puck-bridge-clock-and-home.patch` is a small patch to the official Autonomous Harness puck firmware
+`patches/0001-puck-bridge-firmware.patch` is a patch to the official Autonomous Harness puck firmware
 (github.com/autonomous-ai/openharness, `devices/harness-device/firmware`, commit
 `ce68e2fac27b8523c145f79d9d22f2ad7e589aad`). Apply it from the openharness repo root with
-`git apply firmware/patches/0001-puck-bridge-clock-and-home.patch`, then build with ESP-IDF 5.5 (`idf.py build`).
+`git apply firmware/patches/0001-puck-bridge-firmware.patch`, then build with ESP-IDF 5.5 (`idf.py build`).
+
+**Test it without the puck:** `scripts/test-firmware.sh` applies the patch to a clean upstream checkout and runs
+`firmware/sim`, a host simulator that compiles the real `ui_habitat.c`, `cable_client.c` and `app_main.c` (FreeRTOS
+and ESP-IDF stubbed, single-threaded) and plays scripted touches, buttons and cable messages (`firmware/sim/demo/*.sim`;
+commands are listed at the top of `firmware/sim/src/sim.c`). `shot` writes a PNG of the real frame. CI runs it on
+every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.1` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 1`.
-- **Clock face (new CLOCK view).** The time in Inter 44, am/pm beside it, the date, the weather and high/low,
-  the current pane's pet standing still, and a `[ settings ]` control. Every string comes from the host. Before
-  any `ambient` it shows a dim `--:--`. Letters the font lacks (emoji, for example) are dropped. `°` is drawn.
-  The text moves a couple of pixels each minute to protect the AMOLED from burn-in.
-- **Small (BOOT) button.** A **tap** (released before 800 ms) cancels live voice, then shows the clock. A **hold**
-  (800 ms or more) opens the existing "stop this turn?" screen when the pane on the face is busy, and otherwise turns
+- **Version** `0.0.88-pb.2` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 2`
+  (pb.1 sent 1).
+- **Side pages** (once a Puck Bridge host has sent `ambient`, `pb.menu` or `pb.sound` on this connection; off again on
+  disconnect): `Settings ← Clock → pane 1 → pane 2 → …`. On the face, swiping right from the first pane goes to the
+  clock, and nothing wraps. On the clock, swipe left → the pane on the face (or the first), swipe right → Settings,
+  tap → back to the face. On Settings, swipe left → clock. Page dots on the clock and Settings (settings, clock, up to
+  5 panes, "+" for more). Swipe up on the face → the list of panes. While a Puck Bridge host is connected the face
+  reports no desktop scroll (`ui_scroll_reportable()` is false), which frees vertical swipes; an official daemon keeps
+  scroll, wrap-around and everything else as before.
+- **Clock face (CLOCK view):** the time in 112 px Inter SemiBold with tabular digits (`pb_time`, 13 glyphs), am/pm
+  beside it, the date above in spaced capitals (`pb_caps`), the weather below, the pane's pet standing still, and a
+  ring at the edge with one segment per pane of the current tab (up to 12): orange = working, white = finished with
+  an unread notice, dim = idle; no panes = one dim ring. Every string comes from the host. Before any `ambient` the
+  time is a dim `--:--`. Letters the fonts lack are dropped. Text, dots and ring move a couple of pixels (and the ring
+  ±2°) each minute against AMOLED burn-in. The clock decides on release: a tap goes back to the face, a sideways swipe
+  pages.
+- **Small (BOOT) button.** A **tap** cancels live voice, then: picker → its list, anywhere else → the clock. A
+  **hold** (800 ms or more) opens the "stop this turn?" screen when the pane on the face is busy, and otherwise turns
   the screen on or off as before. A press still wakes a dark screen. Factory reset (BOOT held at power-on) is unchanged.
 - **Idle becomes the clock.** After `idleMin` minutes (default 5) with nothing going on, the agent face becomes the
   clock. "Nothing going on" means no touch, no busy pane, no voice, connected, and the face showing (not a list,
-  question, draft, form, message, stop or update screen). Any touch on the clock goes back to the agent face, and that
-  touch does nothing else. A turn starting, a finished turn that rings, or a host `focus` also leave the clock.
+  question, draft, form, message, stop or update screen). A turn starting, a finished turn that rings, or a host
+  `focus` leave the clock.
 - **Screen sleep.** The firmware normally turns the panel off after 5 minutes without a touch. While the clock is up
   it stays on. If the idle timer had already turned the panel off when the clock takes over, the panel comes back on.
   The PWR tap and the BOOT hold still turn it off.
-- **Settings menu (new PBMENU view).** The Mac sends the rows and the puck shows them. Small button goes back to the clock.
+- **Settings (PBMENU view):** the rows the Mac sends, four at a time, label over value; rows with choices show " ›".
+  A row press counts when the finger lifts inside the row it pressed within 1.8 s, having moved less than 48 px
+  sideways and 40 px down, and the list didn't scroll (the strict tap classifier missed many real presses on this
+  glass). A new `pb.menu` only cancels a held press when a different row is now under the finger.
+- **Picker (PICKER view):** a row with `choices` opens a page of them: the label as header, `<` back, the candidate
+  large in the middle (its pet animated in its idle loop, or its value as text), the neighbours small at the sides,
+  dots, and a **Choose** pill; the host's current value is green. Swipe or tap a neighbour to move. `builtin:true`
+  draws the firmware's own pet even when a custom pack is mapped to that engine.
 - **Notification sounds.** `chime` (the original sound, unchanged sample for sample), `soft`, `bell`, `digital`, with
   a volume setting. Style and volume are kept in RAM only.
+- **Logging:** `ESP_LOGI` lines for every clock, menu, picker and face swipe decision (with touch coordinates), which
+  Puck Bridge writes to its log as `puck: …`.
+- Cost (estimated, x86 object sizes): ~33.5 KB flash for the two fonts, ~8 KB code, ~8.5 KB PSRAM for the choice
+  tables, ~70 B internal RAM.
 
 ## Protocol (only send these when `hello.pb >= 1`)
 
@@ -44,6 +72,17 @@ whole letter).
 Up to 10 items. id, label and value are each at most 23 bytes, and longer values are cut at a whole letter. Rows
 without an id are dropped. This replaces the whole list. If it arrives while the menu is open, the menu redraws.
 
+From pb 2 a row can also carry its choices, shown on a picker page:
+```
+{"id":"character","label":"Character","value":"Clawd","index":0,
+ "choices":[{"value":"Clawd","pet":"claude","builtin":true},{"value":"Codex Bot","pet":"codex","builtin":true},{"value":"Mochi"}]}
+```
+Up to 16 choices per row (extras ignored); `value` ≤ 23 bytes (choices without one are dropped), `pet` ≤ 15 bytes (an
+engine name; unknown or absent → the value as text), `index` absent or out of range → the first. The whole frame must
+stay within the cable's JSON guard: **≤ 512 tokens** (and 8192 bytes), counted as 7 + per row 7 (+2 with `index`,
++2 + 3 per choice, +2 per `pet`, +2 per `builtin`). Over that the frame is dropped and the old list stays, so leave out
+`builtin` when false and `pet` when there is none. Puck Bridge's menu is about 250 tokens.
+
 ```
 {"t":"pb.sound","style":"chime","volume":70,"test":false}
 ```
@@ -54,9 +93,12 @@ microphone is open. Send it after every `welcome`. The official `muted` setting 
 
 Puck → host:
 
-- `{"t":"pb.menu.open"}` when the clock's `[ settings ]` control is tapped. Answer it with `pb.menu`. The puck shows
+- `{"t":"pb.menu.open"}` when the Settings page opens. Answer it with `pb.menu`. The puck shows
   "Loading…" and gives up after 5 s ("No answer from the Mac.").
-- `{"t":"pb.menu.tap","id":"<id>"}` when a row is tapped. Answer with an updated `pb.menu`.
+- `{"t":"pb.menu.tap","id":"<id>"}` when a row without choices is tapped. Answer with an updated `pb.menu`.
+- `{"t":"pb.menu.set","id":"<id>","index":N,"value":"<choice value>"}` (pb 2) when a choice is made on a picker page.
+  The puck goes back to the list; answer with an updated `pb.menu`.
+- `pb.menu.open` is sent when the Settings page opens (a swipe right from the clock).
 
 ## How it degrades
 
@@ -72,7 +114,7 @@ Puck → host:
 ## Restoring official firmware
 
 - Let OpenHarness connect (Puck Bridge → Settings → Advanced → Lend the Puck to OpenHarness…). Its daemon updates the
-  puck to the official firmware, because `0.0.88-pb.1` is not the published version.
+  puck to the official firmware, because `0.0.88-pb.2` is not the published version.
 - Or flash the official image with the repo's `flash-circle.sh --version <x.y.z>`, or write back a full-flash backup
   with `esptool write_flash 0 backup.bin`.
 - If the firmware will not boot, hold BOOT while plugging in to enter ROM download mode, then flash.

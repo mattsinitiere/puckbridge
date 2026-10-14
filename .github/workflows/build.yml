@@ -28,6 +28,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The firmware's UI and cable code in a host simulator (firmware/sim): touch, pages, menu, picker, limits.
+      - name: Puck firmware tests (simulator)
+        run: scripts/test-firmware.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firmware-sim
+          path: firmware/sim/out
+          if-no-files-found: ignore
+          retention-days: 7
       - uses: actions/cache@v4
         id: cache
         with:

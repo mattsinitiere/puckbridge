@@ -1,0 +1,47 @@
+# B3: [settings] <- [clock] -> [pane 1] -> [pane 2] -> [pane 3], no wrap; the small button is the clock.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+time +200
+expect view HOME
+state
+echo --- pane 1, swipe right: the clock
+swipe 120 233 330 233 200
+expect view CLOCK
+echo --- clock, swipe right: settings; settings, swipe left: the clock
+mark
+swipe 120 233 330 233 200
+expect view PBMENU
+expect out pb.menu.open
+include demo/lib/menu.sim
+swipe 330 300 120 300 200
+expect view CLOCK
+echo --- clock, swipe left: pane 1 (the one on the face)
+swipe 330 233 120 233 200
+expect view HOME
+echo --- pane 1 -> pane 2 -> pane 3, and nothing past pane 3
+mark
+swipe 330 233 120 233 200
+expect out {"t":"focus","agentId":"c2"}
+mark
+swipe 330 233 120 233 200
+expect out {"t":"focus","agentId":"c3"}
+mark
+swipe 330 233 120 233 200
+expect noout "t":"focus"
+state
+echo --- pane 3, swipe right: pane 2; the small button: the clock from anywhere
+mark
+swipe 120 233 330 233 200
+expect out {"t":"focus","agentId":"c2"}
+boot tap
+expect view CLOCK
+echo --- a new list: the face keeps a pane on it (the reconcile), and a swipe left from the clock lands there
+in {"t":"agents.begin"}
+in {"t":"agent","id":"n1","name":"New chat","engine":"claude","model":"","effort":"","machineId":"mac-1","machine":"Mac Studio"}
+in {"t":"agents.end","total":1,"tab":"chats"}
+state
+swipe 330 233 120 233 200
+expect view HOME

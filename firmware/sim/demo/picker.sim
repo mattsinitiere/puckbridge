@@ -1,0 +1,45 @@
+# C4: a row with choices opens its picker; swipes and the side pages page; Choose sends pb.menu.set; "<" and the
+# small button leave without choosing.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+swipe 120 233 330 233 200
+include demo/lib/menu.sim
+mark
+tap 233 144 120
+expect view PICKER
+expect noout pb.menu.tap
+shot out/picker_character_clawd.png
+echo --- swipe left: Codex Bot; a tap on the right page: Jolly
+swipe 330 200 120 200 200
+tap 380 200 100
+state
+shot out/picker_character_jolly.png hits
+echo --- Choose
+mark
+tap 233 380 120
+expect out {"t":"pb.menu.set","id":"character","index":2,"value":"Jolly"}
+expect view PBMENU
+echo --- the Mac answers with the list; the Sound picker opens on its current choice; "<" leaves
+in {"t":"pb.menu","title":"Settings","items":[{"id":"character","label":"Character","value":"Jolly","index":2,"choices":[{"value":"Clawd","pet":"claude","builtin":true},{"value":"Codex Bot","pet":"codex"},{"value":"Jolly","pet":"muse"},{"value":"Fo","pet":"fo"},{"value":"Pixel cat"}]},{"id":"sound","label":"Sound","value":"Chime","index":1,"choices":[{"value":"Off"},{"value":"Chime"},{"value":"Soft"},{"value":"Bell"},{"value":"Digital"}]}]}
+tap 233 208 120
+expect view PICKER
+shot out/picker_sound_chime.png
+swipe 330 200 120 200 200
+swipe 330 200 120 200 200
+mark
+tap 100 70 100
+expect view PBMENU
+expect noout pb.menu.set
+echo --- the small button backs a picker out to the list, and the list to the clock
+tap 233 208 120
+expect view PICKER
+mark
+boot tap
+expect view PBMENU
+boot tap
+expect view CLOCK
+expect noout pb.menu.set

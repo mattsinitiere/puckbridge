@@ -1,0 +1,26 @@
+# An official daemon: no ambient, no pb.menu, no pb.sound. The face keeps its wrap-round swipes and its desktop
+# scroll; the small button still shows the clock (--:--), whose settings page never gets an answer.
+log 3
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+time +200
+echo --- the face scrolls the desktop, and a swipe up does not take that over
+mark
+swipe 233 330 233 120 200
+expect out "t":"scroll"
+expect view HOME
+echo --- swipes wrap as they always did: pane 1, right -> pane 3
+mark
+swipe 120 233 330 233 200
+expect out {"t":"focus","agentId":"c3"}
+boot tap
+expect view CLOCK
+shot out/official_clock.png
+mark
+swipe 120 233 330 233 200
+expect view PBMENU
+expect out pb.menu.open
+time +5200
+shot out/official_settings.png
+expect view PBMENU

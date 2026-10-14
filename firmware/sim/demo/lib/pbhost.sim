@@ -1,0 +1,3 @@
+# What only Puck Bridge sends (it has seen hello "pb"): the sound, then the clock's words.
+in {"t":"pb.sound","style":"chime","volume":60}
+in {"t":"ambient","time":"3:44","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"H 75°  L 58°","idleMin":5}

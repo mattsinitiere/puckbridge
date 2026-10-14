@@ -1,0 +1,5 @@
+# The Mac's greeting as Puck Bridge 0.7 sends it, and the machine list it answers machines.list with.
+in {"t":"welcome","proto":3,"app":"Puck Bridge","machine":{"id":"mac-1","name":"Mac Studio"},"selected":"mac-1","voiceLang":"en-US","features":["agents.refresh","settings"]}
+in {"t":"machines.begin"}
+in {"t":"machine","id":"mac-1","name":"Mac Studio","state":"ready","local":true}
+in {"t":"machines.end","selected":"mac-1","source":"local"}

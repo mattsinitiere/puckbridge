@@ -1,0 +1,16 @@
+# The JSON guard (cable_json_guard.c: 512 tokens) bounds a pb.menu: 512 tokens is read, 513 is dropped whole.
+# demo/data/menu_51{2,3}.json come from tools/pb_menu_tokens.py --boundary (5 rows: 16+16+16+16 picture choices + 2).
+log 2
+autoping 1
+include demo/lib/welcome.sim
+include demo/lib/chats3.sim
+include demo/lib/pbhost.sim
+boot tap
+swipe 120 233 330 233 200
+include demo/data/menu_512.inc
+expect bad 0
+state
+expect view PBMENU
+include demo/data/menu_513.inc
+expect bad 1
+state

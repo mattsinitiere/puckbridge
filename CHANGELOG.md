@@ -6,6 +6,12 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 ### Added
+- **Puck Bridge firmware 0.0.88-pb.2** (`firmware/patches/0001-puck-bridge-firmware.patch`, replacing the pb.1 patch):
+  - **Side pages:** Settings ← Clock → your chats. Swipe right from the first chat to reach the clock, right again for Settings; swipe up on a chat for the list of all chats. Dots show where you are.
+  - **New clock:** big time, the date in spaced capitals, the weather, your character, and a ring with one segment per chat (orange = Claude working, white = finished and unread).
+  - **Settings with pickers:** Character, Sound, Volume, Brightness and Clock after open a page of choices. Characters are drawn as themselves, animated, and you swipe through them and tap Choose.
+  - Fixes for Settings on the puck: rows now take a normal press (the strict tap rule missed many real presses), a quick second tap is no longer lost when the Mac re-sends the menu, and the clock decides when you lift your finger instead of on first contact.
+- `firmware/sim`: a host simulator of the puck's firmware (its real UI and cable code) with scripted tests and screenshots; `scripts/test-firmware.sh` runs it in CI on every push.
 - **Claude Code sessions, as Claude's sidebar shows them:** Puck Bridge now reads Claude's Code view (the Mode switch at the top of its sidebar) and lists each project's sessions on the puck, one tab per project (Chats first). Both lists are remembered while Claude shows the other one, and Code sessions also across restarts (titles only).
 - **Open and talk to Code sessions from the puck:** pausing on a session, tapping it or speaking to it switches Claude to its Code list, opens the session and types there. Same for a chat while Claude shows Code sessions. The menu-bar menu gets **Open Code Session**.
 - **Setup window:** on first launch (or a new Mac), one permission at a time: Accessibility, Speech Recognition, Location. Each step moves on by itself when macOS reports the grant. For Accessibility a small card floats beside System Settings with an icon you can drag into the list. Menu → Finish Setting Up… and Settings → General → Walk Me Through It… bring it back.
