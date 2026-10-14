@@ -13,4 +13,10 @@ git -C "$WORK" sparse-checkout set devices/harness-device/firmware
 git -C "$WORK" fetch -q --depth 1 --filter=blob:none origin "$UPSTREAM"
 git -C "$WORK" checkout -q FETCH_HEAD
 for p in firmware/patches/*.patch; do git -C "$WORK" apply --whitespace=nowarn "$PWD/$p"; done
-SANITIZE="${SANITIZE-1}" FW="$WORK/devices/harness-device/firmware" firmware/sim/test.sh
+FW="$WORK/devices/harness-device/firmware"
+# The firmware's own warnings-as-errors, with the compiler ESP-IDF 5.5 uses (GCC 14), when this machine has it.
+if command -v gcc-14 >/dev/null; then
+  echo "→ strict compile (gcc-14, ESP-IDF warning flags)"
+  CC=gcc-14 STRICT=1 FW="$FW" firmware/sim/build.sh
+fi
+SANITIZE="${SANITIZE-1}" FW="$FW" firmware/sim/test.sh

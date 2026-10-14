@@ -1,0 +1,54 @@
+# pb 3: a connection ends on the clock in every order the Mac's first messages can arrive in, at boot (while the
+# face is still loading) and on a reconnect, with pane 1 on the face behind it.
+log 2
+autoping 1
+echo === A. boot: the first ambient before the list (the face is still loading)
+include demo/lib/welcome.sim
+include demo/lib/pbhost.sim
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+time +300
+expect view CLOCK
+state
+shot out/renders/startup_clock.png
+include demo/lib/drop.sim
+expect view HOME
+echo === B. reconnect: list, focus (keepClock), sound, ambient
+include demo/lib/welcome.sim
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+in {"t":"pb.sound","style":"chime","volume":60}
+in {"t":"ambient","time":"3:45","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"","idleMin":5}
+time +300
+expect view CLOCK
+include demo/lib/drop.sim
+echo === C. the focus before its list (it waits for the list), the ambient in between
+include demo/lib/welcome.sim
+in {"t":"focus","agentId":"c1","keepClock":true}
+in {"t":"pb.sound","style":"chime","volume":60}
+in {"t":"ambient","time":"3:46","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"","idleMin":5}
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+time +300
+expect view CLOCK
+include demo/lib/drop.sim
+echo === D. the ambient last, after a keepClock focus: still the clock
+include demo/lib/welcome.sim
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+time +2000
+in {"t":"pb.sound","style":"chime","volume":60}
+time +2000
+in {"t":"ambient","time":"3:47","ampm":"PM","date":"Tuesday, Oct 13","temp":"68°","cond":"Partly cloudy","hilo":"","idleMin":5}
+time +300
+expect view CLOCK
+echo --- and a tap lands on pane 1, never "Choose a pane"
+tap 233 233
+expect view HOME
+state
+echo === E. a later focus with keepClock (a list re-sent) leaves the clock up; one without it takes the face
+boot tap
+in {"t":"focus","agentId":"c2","keepClock":true}
+expect view CLOCK
+in {"t":"focus","agentId":"c3"}
+expect view HOME

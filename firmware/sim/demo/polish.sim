@@ -1,0 +1,43 @@
+# pb 4 polish: the stop question and messages in Puck Bridge's type, answered by the release rule, closing back to
+# the screen they came over; the connecting screen says what it waits for.
+log 2
+autoping 1
+shot out/renders/polish_connecting.png
+include demo/lib/welcome.sim
+include demo/lib/tabs2.sim
+include demo/lib/pbhost.sim
+time +300
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+echo --- the small button held on the clock: the working pane's stop question; Cancel goes back to the clock
+boot hold
+expect view STOP
+shot out/renders/polish_stop.png
+mark
+tap 148 334 400
+expect view CLOCK
+expect noout turn.stop
+echo --- Stop, pressed slowly with a drifting thumb, stops it and goes back to the clock
+boot hold
+mark
+swipe 310 330 326 340 300
+expect out {"t":"turn.stop","agentId":"c2"}
+expect view CLOCK
+echo --- a toast over the clock: a tap anywhere closes it, back to the clock
+in {"t":"toast","text":"Claude isn't writing"}
+expect view MESSAGE
+shot out/renders/polish_toast.png
+tap 120 300 200
+expect view CLOCK
+echo --- over the face: back to the face
+tap 233 233
+in {"t":"toast","text":"Opened in Claude"}
+tap 233 233
+expect view HOME
+echo --- a settings page with no answer says how to leave it
+swipe 330 233 120 233 200
+boot tap
+swipe 120 233 330 233 200
+time +5200
+shot out/renders/polish_no_answer.png
+swipe 330 233 120 233 200
+expect view CLOCK

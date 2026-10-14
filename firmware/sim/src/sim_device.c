@@ -149,6 +149,8 @@ bool audio_notify_set_muted(bool m) { muted = m; printf("NVS muted=%d\n", m); re
 bool audio_notify_is_muted(void) { return muted; }
 void audio_notify_set_sound(const char *style, int volume) { printf("SOUND style=%s volume=%d\n", style ? style : "(keep)", volume); }
 void audio_notify_preview(void) { printf("BEEP preview\n"); }
+void audio_notify_preview_sound(const char *style, int volume)
+{ printf("BEEP preview sound=%s volume=%d%s\n", style ? style : "(chosen)", volume, sim_audio_active ? " (mic open: the real one stays silent)" : ""); }
 bool audio_capture_init(void) { return false; }
 
 // ── NVS (config_store.h), in memory ───────────────────────────────────────────────────────────────────

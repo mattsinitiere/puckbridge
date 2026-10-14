@@ -6,6 +6,38 @@ The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new h
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-14
+### Added
+- **Puck Bridge firmware 0.0.88-pb.4** (all of the puck changes below; install it from Settings → Puck → Firmware).
+- `scripts/test-firmware.sh` also compiles the firmware with GCC 14 and ESP-IDF's warnings-as-errors flags when GCC 14 is installed, so compile errors only the firmware build saw show up in seconds.
+- **Timers** (Puck Bridge firmware pb.4): Settings → Timer on the puck (1 min to 1 hour, or cancel), or the Timer buttons in Settings → Puck on the Mac. The puck counts down by itself, shows it on the clock, and rings at the end until you touch it.
+- **Hear the sounds before choosing them:** on the puck's Sound and Volume pickers, each choice plays when you stop on it.
+### Changed
+- **Tabs are a switch between your chats and Claude Code:** holding the puck's face now offers exactly two tabs, Chats and Claude Code (every Code session, all projects). Choosing one also switches Claude's sidebar to that view, and switching Claude's view on the Mac moves the puck to the matching tab.
+- Code sessions carry their project name to the puck (shown small on Puck Bridge firmware).
+- The startup chat choice no longer takes the puck off its clock (`focus` with `keepClock`).
+- **Puck polish (from a screen-by-screen test of every flow in the firmware simulator):**
+  - The tab screen is a clear switch: one card per tab (Chats / Claude Code) with how many chats or sessions it has and how many are working; tap one to switch, tap the current card or swipe to go back. It used to switch tabs while you were only swiping through.
+  - The face's tips now match the new swipes ("Tap to talk", "Hold for tabs", "Swipe up for all chats", "Swipe right for the clock"), and "Choose a pane" / "Tap the name to switch panes" are gone. An empty tab says "No chats here".
+  - The connecting screen says "Puck Bridge" and "Open Puck Bridge on your Mac" or "Loading your chats…" instead of just "Harness".
+  - Messages from the Mac and voice errors are centred, say "Tap to close", close with a tap anywhere and go back to the clock if they came up over it. "Check Harness on your computer" became "No answer from the Mac. Try again."
+  - The "stop this turn?" screen has proper Cancel / Stop buttons and the chat's name.
+  - The chats list is headed with the tab's name (CHATS / CLAUDE CODE), and Code sessions show their project.
+  - An empty or failed Settings page says how to get back ("Swipe left for the clock").
+  - A picker no longer marks the first choice as current when nothing is.
+### Fixed
+- **Startup on the clock in every case:** the puck stays on its clock however the first messages arrive (chat list before or after the clock, a chat choice, a reconnect). Before, a list arriving after the clock sent it to the chat face.
+- **Startup on the clock, also when Claude is read late:** Puck Bridge reads Claude before it sends the puck its first chat list, and once the puck's clock is up it no longer sends the startup chat choice to firmware that would leave the clock for it. The puck's first tab matches the view Claude is showing.
+- Switching tabs on the puck while Claude is writing no longer flips Claude's view (that hid the reply, so its finish was never seen and the chat stayed "working" for 20 minutes).
+- The puck's small-button Stop only presses Stop when the chat on screen is the one you asked to stop.
+- Opening a chat or Code session from the Mac's menu moves the puck to the matching tab.
+- Timer state can't go stale ("0:00 left" after a missed end); the puck's menu updates when a timer starts, ends or is cancelled.
+- The puck's character picker always includes the current character (it holds 16), and a choice is matched by name if the list changed meanwhile.
+- Two Code sessions with the same title in one project get separate ids; opening by title also checks the project.
+- Code sessions are no longer marked working from their sidebar status until the words Claude uses are confirmed (only logged); a misread status could have kept a spinner going forever.
+- A character removed on another Mac is moved to "Removed Characters" in Puck Bridge's support folder instead of being deleted (a different iCloud account looks the same).
+- **The wrong chat showing as working:** when Claude starts writing, Puck Bridge now matches the conversation's own title more carefully (the row text may be cut short or carry a status like "#5 · Merged"), and when it can't tell which chat it is, it marks none instead of guessing the top row. When the conversation has a title, nothing else (text on screen that happens to equal another chat's name) decides. A row that just appeared counts as the new chat only at the top of its list. The log says why it picked the chat it did.
+
 ## [0.8.1] - 2026-10-14
 ### Added
 - **Characters in iCloud Drive:** your imported characters are kept in iCloud Drive too (Puck Bridge → Characters), so importing them once puts them on every Mac signed in to your iCloud. Removing one removes it everywhere. Settings → Character → "Keep them in iCloud Drive" turns it off. They stay private: never in this app's repo or releases.

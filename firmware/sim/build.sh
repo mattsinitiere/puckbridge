@@ -44,6 +44,15 @@ CFLAGS=(-std=gnu11 -O1 -g -Wall -Wno-format-truncation -Wno-unused-function -Wno
         -Wno-unused-but-set-variable -Wno-missing-braces
         -DHABITAT_FOCUS_ONLY=1 -DHABITAT_NO_COMPANION_ART=1 "-DSIM_FW_VERSION=\"$version\"")
 if [[ -n "${SANITIZE:-}" ]]; then CFLAGS+=(-fsanitize=address,undefined -fno-omit-frame-pointer); fi
+# STRICT=1: the warning flags ESP-IDF builds the firmware with (-Werror=all), at -O2, so a warning that only GCC 14's
+# optimiser sees (stringop-overread on an inlined literal, say) fails here in seconds instead of in the docker build.
+if [[ -n "${STRICT:-}" ]]; then
+  CFLAGS=("${CFLAGS[@]/-O1/-O2}")
+  CFLAGS+=(-Werror=all -Wextra -Wno-error=extra -Wno-unused-parameter -Wno-sign-compare -Wno-enum-conversion
+           -Wno-error=unused-function -Wno-error=unused-variable -Wno-error=unused-but-set-variable
+           -Wno-error=deprecated-declarations -Wno-old-style-declaration -fno-builtin-strncpy)
+fi
+CC="${CC:-cc}"
 INC=(-I "$here/stubs/include" -I "$here/src" -I "$gen" -I "$M" -I "$M/ui" -I "$H" -I "$M/board"
      -I "$here/third_party/cJSON")
 
@@ -64,11 +73,11 @@ objs=(); pids=()
 for src in "${SRCS[@]}"; do
   obj="$out/obj/$(basename "$(dirname "$src")")_$(basename "${src%.c}").o"
   mkdir -p "$out/obj"
-  cc "${CFLAGS[@]}" "${INC[@]}" -c "$src" -o "$obj" &
+  "$CC" "${CFLAGS[@]}" "${INC[@]}" -c "$src" -o "$obj" &
   objs+=("$obj"); pids+=($!)
 done
 status=0
 for pid in "${pids[@]}"; do wait "$pid" || status=1; done
 [[ $status -eq 0 ]] || { echo "compile failed" >&2; exit 1; }
-cc "${CFLAGS[@]}" -o "$out/sim" "${objs[@]}" -lz -lm
+"$CC" "${CFLAGS[@]}" -o "$out/sim" "${objs[@]}" -lz -lm
 echo "built $out/sim (firmware $version from $FW)"

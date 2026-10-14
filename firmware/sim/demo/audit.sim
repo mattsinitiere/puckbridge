@@ -1,0 +1,104 @@
+# The UX walk (pb 4): every screen a Puck Bridge puck shows, in the order a day uses them, shot to out/renders/audit_*.
+log 2
+autoping 1
+shot out/renders/audit_01_boot.png
+include demo/lib/welcome.sim
+include demo/lib/pbhost.sim
+include demo/lib/swarms_chats.sim
+include demo/lib/chats_list.sim
+time +300
+expect view CLOCK
+shot out/renders/audit_02_clock.png
+tap 233 233
+expect view HOME
+shot out/renders/audit_03_face_pane1.png
+swipe 330 233 120 233 200
+shot out/renders/audit_04_face_pane2.png
+echo --- working, finished, unread
+in {"t":"turn.started","agentId":"c2","text":"Writing…"}
+time +4000
+shot out/renders/audit_05_face_working.png
+in {"t":"summary","agentId":"c2","name":"Swift refactor","engine":"claude","machine":"Mac Studio","recap":"I split the view model in two and moved the networking into its own actor; the tests pass.","text":"I split the view model in two."}
+time +300
+shot out/renders/audit_06_face_recap.png
+in {"t":"summary","agentId":"c3","name":"Grocery list","engine":"claude","machine":"Mac Studio","recap":"Added oat milk and eggs.","text":"Added oat milk and eggs."}
+time +300
+shot out/renders/audit_07_face_unread_badge.png
+swipe 233 120 233 330 200
+expect view INBOX
+shot out/renders/audit_08_inbox.png
+boot tap
+tap 233 233
+echo --- the list of chats
+swipe 233 330 233 120 200
+expect view AGENTS
+shot out/renders/audit_09_panes.png
+boot tap
+echo --- the tabs
+tap 233 233
+tap 233 233 800
+expect view TABS
+shot out/renders/audit_10_tabs.png
+tap 233 300 120
+include demo/lib/swarms_code.sim
+include demo/lib/code_list.sim
+time +300
+shot out/renders/audit_11_face_code.png
+swipe 330 233 120 233 200
+shot out/renders/audit_12_face_code_long_name.png
+swipe 233 330 233 120 200
+shot out/renders/audit_13_panes_code.png
+boot tap
+echo --- the clock's ring with work going on and the settings
+in {"t":"turn.started","agentId":"cc-1","text":"Writing…"}
+time +300
+shot out/renders/audit_14_clock_working.png
+swipe 120 233 330 233 200
+include demo/lib/menu3.sim
+shot out/renders/audit_15_settings.png
+swipe 233 330 233 120 400
+shot out/renders/audit_16_settings_scrolled.png
+swipe 233 120 233 330 400
+tap 233 144 120
+shot out/renders/audit_17_picker_character.png
+tap 100 70 100
+tap 233 208 120
+shot out/renders/audit_18_picker_timer.png
+tap 100 70 100
+tap 233 272 120
+shot out/renders/audit_19_picker_sound.png
+tap 100 70 100
+tap 233 336 120
+shot out/renders/audit_20_picker_volume.png
+tap 100 70 100
+boot tap
+echo --- voice
+tap 233 233
+tap 233 233
+time +1500
+shot out/renders/audit_21_voice_listening.png
+tap 233 233
+time +300
+shot out/renders/audit_22_voice_sending.png
+time +70000
+view
+shot out/renders/audit_23_after_voice.png
+boot tap
+echo --- stop
+in {"t":"turn.started","agentId":"cc-1","text":"Writing…"}
+boot hold
+expect view STOP
+shot out/renders/audit_24_stop_confirm.png
+boot tap
+echo --- a toast, a disconnect and the reconnect
+in {"t":"toast","text":"Claude isn't writing"}
+shot out/renders/audit_25_toast.png
+boot tap
+include demo/lib/drop.sim
+shot out/renders/audit_26_disconnected.png
+include demo/lib/welcome.sim
+include demo/lib/pbhost.sim
+include demo/lib/swarms_code.sim
+include demo/lib/code_list.sim
+time +300
+shot out/renders/audit_27_reconnected.png
