@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+### Changed
+- **One puck tab per Claude Code project again** (owner's choice): hold the face → Chats, then each project as Claude's sidebar groups them, with its 16 newest sessions. The single Claude Code tab showed only the 16 newest sessions of all projects, so quieter projects never appeared.
+### Fixed
+- **Folded projects** in Claude's Code sidebar now get a tab too, and keep the sessions Puck Bridge last saw (a folded project shows no sessions to read). Picking a folded project on the puck unfolds it in Claude; opening or speaking to one of its sessions unfolds it first. A project never unfolded since Puck Bridge started shows an empty tab until it's picked or unfolded once.
+### Added
+- `firmware/sim/demo/project_tabs.sim`: five tabs (Chats + four projects) on Puck Bridge firmware use the carousel, a browsed project is selected with the tab handshake and ✓ lands on its session.
 
 ## [0.8.2] - 2026-10-14
 ### Added

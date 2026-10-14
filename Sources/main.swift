@@ -39,7 +39,7 @@ enum Pref {
     static var showReply: Bool { get { bool("showReply", true) } set { d.set(newValue, forKey: "showReply") } }
     static var puckTiles: Bool { get { bool("puckTiles", true) } set { d.set(newValue, forKey: "puckTiles") } }
     static var codeTabs: Bool { get { bool("codeTabs", true) } set { d.set(newValue, forKey: "codeTabs") } }
-    /// The puck tab last chosen ("chats", "code", "p-<hash>" for one project folder, or "settings").
+    /// The puck tab last chosen ("chats", "code-<hash>" for one Claude Code project, or "settings").
     static var tab: String { get { d.string(forKey: "tab") ?? "chats" } set { d.set(newValue, forKey: "tab") } }
     /// A built-in character's engine name ("claude", "codex", "muse", "fo") or "custom".
     static var character: String { get { d.string(forKey: "character") ?? "claude" } set { d.set(newValue, forKey: "character") } }
@@ -264,6 +264,8 @@ struct ClaudeView {
     var modeButtons: [ClaudeMode: AXUIElement] = [:]
     var openTitle = ""          // the open conversation, from its web area's title ("<title> - Claude Code")
     var chats: [Chat] = []      // the rows the sidebar shows now (chats, or Code sessions)
+    /// Code view: every project in sidebar order, folded ones too, with the button that folds/unfolds it.
+    var projects: [(name: String, header: AXUIElement?)] = []
     var writing = false
     var messageLabels: Set<String> = []
     var lastReply = ""
@@ -278,6 +280,7 @@ struct ClaudeView {
 final class Claude {
     private(set) var app: AXUIElement?
     private(set) var running: NSRunningApplication?
+    private var lastUnfold: (project: String, at: Date)?
 
     func attach() -> Bool {
         guard let r = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == CLAUDE_BUNDLE }) else {
@@ -351,7 +354,15 @@ final class Claude {
                 // A Code project in the sidebar: a group holding "<name>" and "New session in <name>".
                 for k in kids where role(k) == "AXButton" {
                     let label = text(k, kAXDescriptionAttribute)
-                    if label.hasPrefix("New session in ") { project = String(label.dropFirst("New session in ".count)); break }
+                    if label.hasPrefix("New session in ") {
+                        let name = String(label.dropFirst("New session in ".count))
+                        project = name
+                        if !v.projects.contains(where: { $0.name == name }) {
+                            let header = kids.first { role($0) == "AXButton" && text($0, kAXTitleAttribute) == name }
+                            v.projects.append((name, header))
+                        }
+                        break
+                    }
                 }
             case "AXButton":
                 let label = text(e, kAXDescriptionAttribute)
@@ -406,6 +417,18 @@ final class Claude {
     }
 
     func press(_ e: AXUIElement) { _ = AXUIElementPerformAction(e, kAXPressAction as CFString) }
+
+    /// Unfold a Code project in the sidebar (press its name) if it shows no sessions. True if pressed.
+    /// Pressing the name again folds it, so the same project is never pressed twice within a few seconds.
+    @discardableResult
+    func unfold(_ project: String, in v: ClaudeView) -> Bool {
+        guard v.mode == .code, !v.chats.contains(where: { $0.project == project }),
+              let h = v.projects.first(where: { $0.name == project })?.header else { return false }
+        if let l = lastUnfold, l.project == project, Date().timeIntervalSince(l.at) < 4 { return false }
+        lastUnfold = (project, Date())
+        say("Claude → unfold the Code project \"\(project)\"")
+        return AXUIElementPerformAction(h, kAXPressAction as CFString) == .success
+    }
 
     /// Claude's window structure for support: roles, button labels and ids, never the conversation text.
     func layoutDump() -> String {
@@ -1462,6 +1485,9 @@ final class Bridge {
     // Claude's sidebar shows chats or Code sessions, never both: each list is kept from when it was last on screen.
     var chatRows: [Chat] = []
     var codeRows: [Chat] = Bridge.loadCodeRows()
+    /// Claude Code projects in sidebar order, folded ones too (a folded project shows no sessions in the sidebar).
+    var codeProjects: [String] = UserDefaults.standard.stringArray(forKey: "codeProjects") ?? []
+    var pendingUnfold: (project: String, at: Date)?
     var codeStatuses: Set<String> = []   // the Code status words seen so far (logged once each, to learn them)
     var pendingOpen: (id: String, title: String, at: Date, why: String)?
     var pendingMode: (mode: ClaudeMode, at: Date)?
@@ -1618,17 +1644,56 @@ final class Bridge {
     }
 
     // ---------- tabs ----------
-    /// Two tabs, one per view of Claude's sidebar: Chats and Claude Code (its sessions in the sidebar's order, every
-    /// project). Settings comes last, for official firmware only (Puck Bridge firmware has its own Settings page).
+    /// Chats, then one tab per Claude Code project in the sidebar's order (its newest 16 sessions), folded projects
+    /// included. Settings comes last, for official firmware only (Puck Bridge firmware has its own Settings page).
     func buildTabs() -> [PuckTab] {
         let chats = chatRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
+        let settings = Pref.puckTiles && pbFirmware < 1
         if Pref.codeTabs {
-            out.append(PuckTab(id: "code", name: "Claude Code", items: codeRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
+            for p in projectOrder.prefix(MAX_TABS - 1 - (settings ? 1 : 0)) {
+                let rows = codeRows.filter { ($0.project ?? "Code") == p }.prefix(MAX_ROWS)
+                out.append(PuckTab(id: Bridge.codeTabId(p), name: p, items: rows.map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
+            }
         }
-        if Pref.puckTiles && pbFirmware < 1 {
+        if settings {
             out.append(PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) }))
         }
+        return out
+    }
+
+    /// A Claude Code project's tab id (short and stable: the firmware takes at most 47 bytes).
+    static func codeTabId(_ project: String) -> String { "code-" + fnv64(project) }
+    static func isCodeTab(_ id: String) -> Bool { id.hasPrefix("code-") }
+    /// The project a tab shows, if it's a Code tab.
+    func project(ofTab id: String) -> String? { projectOrder.first { Bridge.codeTabId($0) == id } }
+    /// The tab a row lives on.
+    func tabId(for chat: Chat) -> String { chat.project.map { Bridge.codeTabId($0) } ?? "chats" }
+
+    /// Projects as the sidebar lists them, then any that only remembered sessions name (e.g. "Code").
+    var projectOrder: [String] {
+        var out = codeProjects
+        for c in codeRows { let p = c.project ?? "Code"; if !out.contains(p) { out.append(p) } }
+        return out
+    }
+
+    /// The Code list to keep after a read of Claude's Code view: what's on screen, plus the remembered sessions of
+    /// projects that are folded right now (a folded project shows its name but no sessions). Projects no longer in
+    /// the sidebar are forgotten. Sidebar order throughout.
+    func mergeCodeRows(visible: [Chat], projects: [String]) -> [Chat] {
+        guard !projects.isEmpty else { return visible }   // couldn't see the project groups: trust the rows
+        if projects != codeProjects {
+            codeProjects = projects
+            UserDefaults.standard.set(projects, forKey: "codeProjects")
+        }
+        var out: [Chat] = []
+        for p in projects {
+            let shown = visible.filter { $0.project == p }
+            out += shown.isEmpty
+                ? codeRows.filter { $0.project == p }.map { Chat(id: $0.id, title: $0.title, element: nil, project: p, status: $0.status, label: $0.label) }
+                : shown
+        }
+        out += visible.filter { $0.project == nil || !projects.contains($0.project!) }
         return out
     }
 
@@ -1703,8 +1768,10 @@ final class Bridge {
         tabSwitchedAt = Date()
         focusAfterList = true
         pushTabs(force: true)   // the puck then asks for the tab's rows (agents.refresh)
-        // The tabs are Claude's two views: Claude follows, once the swipe settles (swarm.select repeats while swiping).
-        if id == "chats" || id == "code" { pendingMode = (id == "code" ? .code : .chat, Date()) }
+        // Claude follows, once the swipe settles (swarm.select repeats while swiping): its Chat or Code view, and for
+        // a project that's folded in the sidebar, the project unfolded so its sessions can be read and opened.
+        if id == "chats" { pendingMode = (.chat, Date()); pendingUnfold = nil }
+        if let p = project(ofTab: id) { pendingMode = (.code, Date()); pendingUnfold = (p, Date()) }
     }
 
     /// Claude's sidebar follows the puck's tab (applied ~1 s after the last swarm.select).
@@ -1720,12 +1787,23 @@ final class Bridge {
         if claude.show(p.mode, in: view) { modeRequestedAt = Date() }
     }
 
+    /// Unfold the project picked on the puck once Claude shows its Code view (within a few seconds of the pick).
+    func applyPendingUnfold() {
+        guard let u = pendingUnfold, pendingMode == nil else { return }
+        if Date().timeIntervalSince(u.at) > 6 { pendingUnfold = nil; return }
+        guard view.mode == .code, writingChat == nil else { return }
+        pendingUnfold = nil
+        claude.unfold(u.project, in: view)
+    }
+
     /// The puck opens on the tab for the view Claude shows (and on Chats if the saved tab no longer exists).
     /// True if the tab changed.
     @discardableResult
     func tabToClaudeView() -> Bool {
-        var id = ["chats", "code", "settings"].contains(Pref.tab) ? Pref.tab : "chats"
-        if Pref.codeTabs, view.mode != .unknown { id = view.mode == .code ? "code" : "chats" }
+        let all = buildTabs()
+        var id = all.contains(where: { $0.id == Pref.tab }) ? Pref.tab : "chats"
+        if Pref.codeTabs, view.mode == .chat { id = "chats" }
+        if Pref.codeTabs, view.mode == .code, !Bridge.isCodeTab(id) { id = codeTabForClaude() ?? id }
         guard id != Pref.tab else { return false }
         Pref.tab = id
         return true
@@ -1733,7 +1811,7 @@ final class Bridge {
 
     /// Move the puck to the tab holding `chatId` (it was opened from the Mac's menu or by voice) and show it there.
     func moveTab(toCode code: Bool, focus chatId: String) {
-        let id = code ? "code" : "chats"
+        let id = allRows.first { $0.id == chatId }.map { tabId(for: $0) } ?? "chats"
         guard greeted, Pref.codeTabs || !code, id != Pref.tab else { return }
         Pref.tab = id
         tabSwitchedAt = Date()
@@ -1743,12 +1821,18 @@ final class Bridge {
         send(["t": "focus", "agentId": chatId])
     }
 
+    /// The Code tab matching Claude's Code view: the open session's project, else the first project.
+    func codeTabForClaude() -> String? {
+        if let open = openChatId(view), let c = codeRows.first(where: { $0.id == open }) { return tabId(for: c) }
+        return projectOrder.first.map { Bridge.codeTabId($0) }
+    }
+
     /// The puck's tab follows Claude when you switch Claude's view on the Mac.
     func followClaudeMode(_ mode: ClaudeMode) {
         guard greeted, mode != .unknown, Date().timeIntervalSince(modeRequestedAt) > 4, pendingMode == nil else { return }
-        let id = mode == .code ? "code" : "chats"
-        guard id != Pref.tab, tabs.contains(where: { $0.id == id }) || id == "chats" else { return }
-        say("Puck → tab \"\(id == "code" ? "Claude Code" : "Chats")\" (Claude switched views)")
+        if mode == .code && Bridge.isCodeTab(Pref.tab) { return }   // already on a Code project
+        guard let id = mode == .code ? codeTabForClaude() : "chats", id != Pref.tab else { return }
+        say("Puck → tab \"\(id == "chats" ? "Chats" : project(ofTab: id) ?? "Claude Code")\" (Claude switched views)")
         Pref.tab = id
         tabSwitchedAt = Date()
         focusAfterList = true
@@ -2207,6 +2291,8 @@ final class Bridge {
         if let c = v.chats.first(where: { $0.id == p.id }) ?? v.chats.first(where: { $0.title == p.title && $0.isCode == code && $0.project == project }) {
             pendingOpen = nil
             opened(c, why: p.why)
+        } else if code, let pr = project, claude.unfold(pr, in: v) {
+            pendingOpen = (p.id, p.title, Date(), p.why)   // its project was folded: look again once it's open
         } else if Date().timeIntervalSince(p.at) > 4 {
             pendingOpen = nil
             say("Couldn't find \"\(p.title)\" after switching Claude's list")
@@ -2444,6 +2530,12 @@ final class Bridge {
                 v = claude.read()
                 c = v.chats.first { $0.id == id } ?? v.chats.first { $0.title == k.title && $0.isCode == k.isCode && $0.project == k.project }
             }
+            if c == nil, let k = known, let p = k.project, claude.unfold(p, in: v) {
+                // Its project is folded in the sidebar: unfold it, then find the session.
+                Thread.sleep(forTimeInterval: 0.8)
+                v = claude.read()
+                c = v.chats.first { $0.id == id } ?? v.chats.first { $0.title == k.title && $0.isCode && $0.project == p }
+            }
             if let c = c {
                 target = c
                 if c.id != lastOpened || switched {
@@ -2580,9 +2672,10 @@ final class Bridge {
         // the list on a switch (chats can come back with new ids) and a Code session's id follows its title.
         let switchedMode = !first && prev.mode != cur.mode
         if cur.mode == .code {
-            carryIds(from: codeRows, to: cur.chats)
+            let merged = mergeCodeRows(visible: cur.chats, projects: cur.projects.map { $0.name })
+            carryIds(from: codeRows, to: merged)
             let before = codeRows
-            codeRows = cur.chats
+            codeRows = merged
             if before.map({ $0.id + $0.status }) != codeRows.map({ $0.id + $0.status }) { saveCodeRows() }
             watchCodeStatuses(codeRows, before: before, now: now)
         } else {
@@ -2825,6 +2918,7 @@ final class Bridge {
             }
             if pendingOpen != nil, now.timeIntervalSince(pendingOpen!.at) > 0.7 { finishPendingOpen() }
             if pendingMode != nil { applyPendingMode() }
+            if pendingUnfold != nil { applyPendingUnfold() }
             if let p = pendingStop, now.timeIntervalSince(p.at) > 2.0, pendingOpen == nil {
                 pendingStop = nil
                 let v = claude.read()
@@ -3767,7 +3861,7 @@ struct ClaudePane: View {
             Section("Claude Code") {
                 Toggle("Show Claude Code sessions as tabs on the puck", isOn: $codeTabs)
                     .onChange(of: codeTabs) { _, _ in model.refreshCode() }
-                Text("Hold the puck's face to switch tabs: Chats, then one per Claude Code project, as Claude's sidebar groups them. Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that. Opening a session from the puck switches Claude to the right list.")
+                Text("Hold the puck's face to switch tabs: Chats, then one per Claude Code project, as Claude's sidebar groups them (folded projects too). Open Claude's Code view once so Puck Bridge can see your sessions; it remembers them after that, also when you fold a project. Picking a project on the puck switches Claude to its Code view and unfolds that project.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("When Claude finishes") {
