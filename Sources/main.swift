@@ -56,6 +56,8 @@ enum Pref {
     static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
     static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
     /// Keep the character library in iCloud Drive too, so every Mac signed in to it has the same characters.
+    /// The last timer length started on the puck, in minutes.
+    static var timerLast: Int { get { d.object(forKey: "timerLast") as? Int ?? 5 } set { d.set(newValue, forKey: "timerLast") } }
     static var syncCharacters: Bool { get { bool("syncCharacters", true) } set { d.set(newValue, forKey: "syncCharacters") } }
 }
 
@@ -251,6 +253,7 @@ struct Chat {
     let element: AXUIElement?
     var project: String? = nil
     var status = ""
+    var label = ""   // the row button's title: "<status> <title>"
     var isCode: Bool { project != nil }
 }
 let CODE_PREFIX = "cc-"
@@ -315,7 +318,7 @@ final class Claude {
             return (!id.isEmpty && !title.isEmpty) ? (id, status, title) : nil
         }
 
-        var rows: [(e: AXUIElement, dom: String, status: String, title: String, project: String?)] = []
+        var rows: [(e: AXUIElement, dom: String, status: String, title: String, label: String, project: String?)] = []
         func walk(_ e: AXUIElement, _ d: Int, _ inRow: Bool, _ project: String?) {
             seen += 1
             if seen > 30000 || d > 90 { return }
@@ -359,7 +362,7 @@ final class Claude {
                     if let r = label.range(of: "Claude responded: ") { replies.append(String(label[r.upperBound...])) }
                 }
                 if !inRow, let c = row(e) {
-                    rows.append((e, c.dom, c.status, c.title, project)); inside = true
+                    rows.append((e, c.dom, c.status, c.title, text(e, kAXTitleAttribute), project)); inside = true
                     if let p = point(e), let s = size(e) { sidebarRight = max(sidebarRight, p.x + s.width) }
                 }
             default:
@@ -373,8 +376,8 @@ final class Claude {
         v.chats = rows.map { r in
             // On Code mode every row is a session; one outside any project group goes under "Code".
             let project = r.project ?? (v.mode == .code ? "Code" : nil)
-            guard let p = project else { return Chat(id: r.dom, title: r.title, element: r.e, status: r.status) }
-            return Chat(id: codeId(project: p, title: r.title), title: r.title, element: r.e, project: p, status: r.status)
+            guard let p = project else { return Chat(id: r.dom, title: r.title, element: r.e, status: r.status, label: r.label) }
+            return Chat(id: codeId(project: p, title: r.title), title: r.title, element: r.e, project: p, status: r.status, label: r.label)
         }
         v.lastReply = replies.last ?? ""
         v.mainTexts = texts.filter { $0.1 > sidebarRight + 8 }.map { $0.0 }
@@ -1343,7 +1346,6 @@ func fit(_ s: String, bytes: Int = 39) -> String {
     return out
 }
 /// Short stable id for a project folder (FNV-1a), so tab ids stay well under the firmware's 47 bytes.
-func tabId(forProject name: String) -> String { "p-" + fnv64(name) }
 
 /// What the puck reports in every `hello` and `settings.state`. It stores these itself (NVS), so it is the source of truth.
 struct PuckSettings: Equatable {
@@ -1452,6 +1454,9 @@ final class Bridge {
     var codeRows: [Chat] = Bridge.loadCodeRows()
     var codeStatuses: Set<String> = []   // the Code status words seen so far (logged once each, to learn them)
     var pendingOpen: (id: String, title: String, at: Date, why: String)?
+    var pendingMode: (mode: ClaudeMode, at: Date)?
+    var modeRequestedAt = Date.distantPast
+    var writingNoted = false     // logged once that the writing conversation matches no row
     var focusAfterList = false   // tell the puck which pane is on its face after the next list (connect, tab switch)
     var tabs: [PuckTab] = []
     var pushedTabsKey = ""
@@ -1600,22 +1605,18 @@ final class Bridge {
     }
 
     // ---------- tabs ----------
-    /// Chats, then one tab per Claude Code project (in the sidebar's order), then Settings (official firmware only).
+    /// Two tabs, one per view of Claude's sidebar: Chats and Claude Code (its sessions in the sidebar's order, every
+    /// project). Settings comes last, for official firmware only (Puck Bridge firmware has its own Settings page).
     func buildTabs() -> [PuckTab] {
         let chats = chatRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }
         var out = [PuckTab(id: "chats", name: "Chats", items: Array(chats))]
-        let settings = Pref.puckTiles && pbFirmware < 1 ? [PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) })] : []
-        guard Pref.codeTabs else { return out + settings }
-        var projects: [String] = [], byProject: [String: [Chat]] = [:]
-        for c in codeRows {
-            guard let p = c.project else { continue }
-            if byProject[p] == nil { projects.append(p) }
-            byProject[p, default: []].append(c)
+        if Pref.codeTabs {
+            out.append(PuckTab(id: "code", name: "Claude Code", items: codeRows.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
         }
-        for p in projects.prefix(MAX_TABS - out.count - settings.count) {
-            out.append(PuckTab(id: tabId(forProject: p), name: p, items: byProject[p]!.prefix(MAX_ROWS).map { PuckItem(id: $0.id, name: $0.title, chat: $0) }))
+        if Pref.puckTiles && pbFirmware < 1 {
+            out.append(PuckTab(id: "settings", name: "Settings", items: tiles.map { PuckItem(id: $0.id, name: tileName($0), tile: $0) }))
         }
-        return out + settings
+        return out
     }
 
     /// Every row the puck can show, from both of Claude's modes.
@@ -1657,8 +1658,10 @@ final class Bridge {
         pushedKey = key
         send(["t": "agents.begin"])
         for i in tab.items {
-            send(["t": "agent", "id": i.id, "name": fit(i.name), "engine": eng, "model": "", "effort": "",
-                  "machineId": MACHINE_ID, "machine": MACHINE_NAME])
+            var m: [String: Any] = ["t": "agent", "id": i.id, "name": fit(i.name), "engine": eng, "model": "", "effort": "",
+                                    "machineId": MACHINE_ID, "machine": MACHINE_NAME]
+            if let p = i.chat?.project { m["project"] = fit(p, bytes: 23) }   // Puck Bridge firmware shows it small
+            send(m)
         }
         send(["t": "agents.end", "total": tab.items.count, "tab": tab.id])
         // A fresh connection or a new tab has no pane chosen: the puck would show "Choose a pane". Choose one:
@@ -1667,7 +1670,7 @@ final class Bridge {
             focusAfterList = false
             let open = openChatId(view)
             let pick = tab.items.first { $0.id == lastOpenedId } ?? tab.items.first { $0.id == open } ?? tab.items[0]
-            send(["t": "focus", "agentId": pick.id])
+            send(["t": "focus", "agentId": pick.id, "keepClock": true])   // choose it, but stay on the clock
         }
         // How-to text on each settings tile; `restore` = history, so no beep and nothing in the drawer.
         for t in tab.items.compactMap({ $0.tile }) {
@@ -1685,6 +1688,30 @@ final class Bridge {
         tabSwitchedAt = Date()
         focusAfterList = true
         pushTabs(force: true)   // the puck then asks for the tab's rows (agents.refresh)
+        // The tabs are Claude's two views: Claude follows, once the swipe settles (swarm.select repeats while swiping).
+        if id == "chats" || id == "code" { pendingMode = (id == "code" ? .code : .chat, Date()) }
+    }
+
+    /// Claude's sidebar follows the puck's tab (applied ~1 s after the last swarm.select).
+    func applyPendingMode() {
+        guard let p = pendingMode, Date().timeIntervalSince(p.at) > 1.0 else { return }
+        pendingMode = nil
+        guard claude.app != nil, view.mode != .unknown, view.mode != p.mode else { return }
+        if claude.show(p.mode, in: view) { modeRequestedAt = Date() }
+    }
+
+    /// The puck's tab follows Claude when you switch Claude's view on the Mac.
+    func followClaudeMode(_ mode: ClaudeMode) {
+        guard greeted, mode != .unknown, Date().timeIntervalSince(modeRequestedAt) > 4, pendingMode == nil else { return }
+        let id = mode == .code ? "code" : "chats"
+        guard id != Pref.tab, tabs.contains(where: { $0.id == id }) || id == "chats" else { return }
+        say("Puck → tab \"\(id == "code" ? "Claude Code" : "Chats")\" (Claude switched views)")
+        Pref.tab = id
+        tabSwitchedAt = Date()
+        focusAfterList = true
+        tabs = buildTabs()
+        pushTabs(force: true)
+        pushChats(force: true)
     }
 
     func toast(_ s: String) { send(["t": "toast", "text": s]) }
@@ -1824,6 +1851,12 @@ final class Bridge {
             sendMenu()
         case "pb.menu.tap":
             if let id = msg["id"] as? String { menuTap(id) }
+        case "pb.timer.state":
+            if let left = msg["seconds"] as? Int { timerEnd = left > 0 ? Date().addingTimeInterval(Double(left)) : nil; publish() }
+        case "pb.timer.done":
+            timerEnd = nil
+            say("Timer: done (\(msg["reason"] as? String ?? "?"))")
+            publish()
         case "pb.menu.set":
             if let id = msg["id"] as? String, let i = msg["index"] as? Int { menuSet(id, index: i) }
         case "fw.accept":
@@ -1861,7 +1894,18 @@ final class Bridge {
     // The firmware only draws rows and reports taps; each tap moves that setting to its next value here.
     // From firmware pb 2 a row can carry its choices: the puck shows them on a picker page (each character drawn as
     // itself) and reports the one chosen (pb.menu.set).
-    struct MenuRow { let id: String; let label: String; let value: String; var choices: [(value: String, pet: String?, builtin: Bool)] = []; var index = 0 }
+    /// One choice on a picker page. `pet` draws that engine's character (`builtin`: the firmware's own, even when a
+    /// custom pack is mapped to it); `sound` / `volume` make the puck play a preview when the choice is shown (pb 3).
+    struct MenuChoice {
+        var value: String; var pet: String? = nil; var builtin = false; var sound: String? = nil; var volume: Int? = nil
+        init(_ value: String, pet: String? = nil, builtin: Bool = false, sound: String? = nil, volume: Int? = nil) {
+            self.value = value; self.pet = pet; self.builtin = builtin; self.sound = sound; self.volume = volume
+        }
+    }
+    struct MenuRow { let id: String; let label: String; let value: String; var choices: [MenuChoice] = []; var index = 0 }
+    static let timerMinutes = [1, 3, 5, 10, 15, 25, 30, 45, 60]
+    func minutesName(_ m: Int) -> String { m == 60 ? "1 hour" : "\(m) min" }
+    var timerLeft: Int? { timerEnd.map { max(0, Int($0.timeIntervalSinceNow.rounded())) } }
 
     static let volumeSteps = [25, 50, 75, 100], brightnessSteps = [20, 40, 60, 80, 100], clockSteps = [0, 2, 5, 10, 15, 30]
     static func nearest(_ list: [Int], _ v: Int) -> Int { list.indices.min { abs(list[$0] - v) < abs(list[$1] - v) } ?? 0 }
@@ -1871,27 +1915,36 @@ final class Bridge {
         let chars = characterChoices
         var character = MenuRow(id: "character", label: "Character", value: characterName(Pref.character))
         character.choices = chars.prefix(16).map { id in
-            if !isLibrary(id) { return (characterName(id), id, true) }
+            if !isLibrary(id) { return MenuChoice(characterName(id), pet: id, builtin: true) }
             // An imported character can only be drawn when it is the one on the puck (mapped to "claude").
             let onPuck = custom?.libId == id && custom.map { petHeld.contains($0.id) } == true
-            return (characterName(id), onPuck ? "claude" : nil, false)
+            return MenuChoice(characterName(id), pet: onPuck ? "claude" : nil)
         }
         character.index = chars.firstIndex(of: Pref.character) ?? 0
-        var rows = [character]
+        var rows: [MenuRow] = []
+        if pbFirmware >= 3 {
+            // Timers count down on the puck itself; the Mac starts and cancels them.
+            let left = timerLeft
+            var timer = MenuRow(id: "timer", label: "Timer", value: left.map { String(format: "%d:%02d left", $0 / 60, $0 % 60) } ?? "Off")
+            timer.choices = Bridge.timerMinutes.map { MenuChoice(minutesName($0)) } + (left != nil ? [MenuChoice("Cancel timer")] : [])
+            timer.index = left != nil ? Bridge.timerMinutes.count : (Bridge.timerMinutes.firstIndex(of: Pref.timerLast) ?? 2)
+            rows.append(timer)
+        }
+        rows.append(character)
         if let s = puckSettings {
             var sound = MenuRow(id: "sound", label: "Sound", value: s.muted ? "Off" : soundName(Pref.soundStyle))
-            sound.choices = [("Off", nil, false)] + SOUND_STYLES.map { ($0.name, nil, false) }
+            sound.choices = [MenuChoice("Off")] + SOUND_STYLES.map { MenuChoice($0.name, sound: $0.id) }
             sound.index = s.muted ? 0 : (SOUND_STYLES.firstIndex { $0.id == Pref.soundStyle } ?? 0) + 1
             var volume = MenuRow(id: "volume", label: "Volume", value: "\(Pref.soundVolume)%")
-            volume.choices = Bridge.volumeSteps.map { ("\($0)%", nil, false) }
+            volume.choices = Bridge.volumeSteps.map { MenuChoice("\($0)%", volume: $0) }
             volume.index = Bridge.nearest(Bridge.volumeSteps, Pref.soundVolume)
             var bright = MenuRow(id: "brightness", label: "Brightness", value: "\(s.brightness)%")
-            bright.choices = Bridge.brightnessSteps.map { ("\($0)%", nil, false) }
+            bright.choices = Bridge.brightnessSteps.map { MenuChoice("\($0)%") }
             bright.index = Bridge.nearest(Bridge.brightnessSteps, s.brightness)
             rows += [sound, volume, bright, MenuRow(id: "calm", label: "Calm mode", value: s.quiet ? "On" : "Off")]
         }
         var clock = MenuRow(id: "clock", label: "Clock after", value: clockName(Pref.idleMin))
-        clock.choices = Bridge.clockSteps.map { (clockName($0), nil, false) }
+        clock.choices = Bridge.clockSteps.map { MenuChoice(clockName($0)) }
         clock.index = Bridge.nearest(Bridge.clockSteps, Pref.idleMin)
         rows += [clock,
                  MenuRow(id: "clock24", label: "24-hour clock", value: Pref.clock24 ? "On" : "Off"),
@@ -1909,6 +1962,10 @@ final class Bridge {
                 m["choices"] = r.choices.map { c -> [String: Any] in
                     var o: [String: Any] = ["value": String(c.value.prefix(23))]
                     if let p = c.pet { o["pet"] = p; if c.builtin { o["builtin"] = true } }
+                    if pbFirmware >= 3 {
+                        if let snd = c.sound { o["sound"] = snd }
+                        if let v = c.volume { o["volume"] = v; o["sound"] = Pref.soundStyle }
+                    }
                     return o
                 }
             }
@@ -1919,6 +1976,13 @@ final class Bridge {
     /// A choice made on the puck's picker page.
     func menuSet(_ id: String, index: Int) {
         switch id {
+        case "timer":
+            if index >= 0 && index < Bridge.timerMinutes.count {
+                let m = Bridge.timerMinutes[index]
+                startTimer(minutes: m)
+            } else if index == Bridge.timerMinutes.count && timerEnd != nil {
+                cancelTimer()
+            }
         case "character":
             let chars = characterChoices
             guard chars.indices.contains(index) else { break }
@@ -1945,6 +2009,24 @@ final class Bridge {
         }
         say("Puck menu → \(id) #\(index)")
         sendMenu()
+        publish()
+    }
+
+    // ---------- timers (they count down on the puck; firmware pb 3) ----------
+    var timerEnd: Date?
+    func startTimer(minutes m: Int) {
+        guard greeted, pbFirmware >= 3 else { return }
+        Pref.timerLast = m
+        timerEnd = Date().addingTimeInterval(Double(m * 60))
+        send(["t": "pb.timer", "seconds": m * 60, "label": "\(minutesName(m)) timer"])
+        say("Timer: \(minutesName(m)) on the puck")
+        publish()
+    }
+    func cancelTimer() {
+        guard greeted, pbFirmware >= 3 else { return }
+        timerEnd = nil
+        send(["t": "pb.timer", "seconds": 0])
+        say("Timer: cancelled")
         publish()
     }
 
@@ -2037,6 +2119,7 @@ final class Bridge {
         if let chat = v.chats.first(where: { $0.id == id }) { opened(chat, why: why); return }
         // On Claude's other mode (or remembered from the last run): switch the sidebar, then open it (finishPendingOpen).
         guard let row = allRows.first(where: { $0.id == id }) else { say("Asked to open a chat that's no longer in the sidebar"); return }
+        modeRequestedAt = Date()
         guard claude.show(row.isCode ? .code : .chat, in: v) else {
             if why == "tap" { toast("Couldn't switch Claude to its \(row.isCode ? "Code" : "Chat") list") }
             return
@@ -2287,6 +2370,9 @@ final class Bridge {
         var switched = false
         if let id = chatId {
             var c = v.chats.first { $0.id == id }
+            if c == nil, known != nil {
+                perform { $0.modeRequestedAt = Date() }   // our switch: the puck's tab doesn't follow it
+            }
             if c == nil, let k = known, claude.show(k.isCode ? .code : .chat, in: v) {
                 // It's on Claude's other list (chats vs Code sessions): switch, then find it again.
                 switched = true
@@ -2347,11 +2433,9 @@ final class Bridge {
     // ---------- Claude watching ----------
     /// The chat on screen: the one whose title shows in the conversation area (its header). nil = can't tell.
     func openChatId(_ v: ClaudeView) -> String? {
-        // The conversation's own title (its web area: "<title> - Claude Code"), when exactly one row has it.
-        if !v.openTitle.isEmpty {
-            let same = v.chats.filter { $0.title == v.openTitle }
-            if same.count == 1 { return same[0].id }
-        }
+        // The conversation's own title (its web area: "<title> - Claude Code"), when exactly one row has it. The row's
+        // text can be cut short or carry its status ("#5 · Merged <title>"), so its button title is checked too.
+        if let id = openTitleRow(v) { return id }
         var titles: [String: String] = [:]   // title -> id, only titles no other chat shares
         var dup = Set<String>()
         for c in v.chats {
@@ -2360,6 +2444,23 @@ final class Bridge {
         }
         for t in v.mainTexts where !dup.contains(t) { if let id = titles[t] { return id } }
         return nil
+    }
+
+    static func squash(_ t: String) -> String {
+        t.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: "…. "))
+    }
+    func openTitleRow(_ v: ClaudeView) -> String? {
+        let open = Bridge.squash(v.openTitle)
+        guard open.count >= 2 else { return nil }
+        let exact = v.chats.filter { Bridge.squash($0.title) == open || Bridge.squash($0.label).hasSuffix(" " + open) }
+        if exact.count == 1 { return exact[0].id }
+        if exact.count > 1 { return nil }
+        // A long title cut short in one place but not the other.
+        let near = v.chats.filter { c in
+            let t = Bridge.squash(c.title)
+            return t.count >= 12 && open.count >= 12 && (t.hasPrefix(open) || open.hasPrefix(t))
+        }
+        return near.count == 1 ? near[0].id : nil
     }
 
     func startBusy(_ id: String, prev: ClaudeView, now: Date) {
@@ -2422,7 +2523,10 @@ final class Bridge {
             carryIds(from: chatRows, to: cur.chats)
             chatRows = cur.chats
         }
-        if switchedMode { say("Claude shows its \(cur.mode == .code ? "Code sessions" : "chats")") }
+        if switchedMode {
+            say("Claude shows its \(cur.mode == .code ? "Code sessions" : "chats")")
+            followClaudeMode(cur.mode)
+        }
         // A row is "new" (a chat started from the home screen) only if it appears while its list is on screen.
         for c in cur.chats where firstSeen[c.id] == nil { firstSeen[c.id] = seenOnce && !switchedMode ? now : .distantPast }
         seenOnce = true
@@ -2432,12 +2536,18 @@ final class Bridge {
         if settled && cur.writing {
             // Which chat is writing: the one on screen, else a chat that just appeared (new chat from the home
             // screen), else the one last opened from the puck or menu, else the top row.
-            var id = open
+            // A wrong guess shows another chat working on the puck (owner, Oct 2026), which is worse than none: when the
+            // open conversation has a title that matches no row, nothing is marked.
+            var id = open, why = "it's on screen"
             let since = writingChat.flatMap { busy[$0]?.since } ?? now
-            if id == nil, let fresh = cur.chats.first(where: { (firstSeen[$0.id] ?? .distantPast) > since.addingTimeInterval(-5) }) { id = fresh.id }
-            if id == nil { id = writingChat }
-            if id == nil, let o = openedFromPuck, now.timeIntervalSince(openedAt) < 600, cur.chats.contains(where: { $0.id == o }) { id = o }
-            if id == nil { id = cur.chats.first?.id }
+            let titled = !cur.openTitle.isEmpty
+            if id == nil, let fresh = cur.chats.first(where: { (firstSeen[$0.id] ?? .distantPast) > since.addingTimeInterval(-5) }) { id = fresh.id; why = "it just appeared" }
+            if id == nil, let w = writingChat { id = w; why = "it was writing already" }
+            if id == nil, !titled, let o = openedFromPuck, now.timeIntervalSince(openedAt) < 600, cur.chats.contains(where: { $0.id == o }) { id = o; why = "it was opened from the puck" }
+            if id == nil && !writingNoted {
+                writingNoted = true
+                say("Claude is writing in a conversation Puck Bridge can't match to a row\(titled ? " (its title isn't in the sidebar list)" : ""); not marking any chat busy")
+            }
             if let id = id, id != writingChat {
                 if let old = writingChat {
                     if prev.writing && open == nil, (firstSeen[id] ?? .distantPast) > (busy[old]?.since ?? now).addingTimeInterval(-5) {
@@ -2449,9 +2559,11 @@ final class Bridge {
                 }
                 startBusy(id, prev: prev, now: now)
                 writingChat = id
-                say("Claude is writing in \"\(title(id))\" (button \"\(cur.stopLabel)\")")
+                say("Claude is writing in \"\(title(id))\" (\(why); button \"\(cur.stopLabel)\")")
             }
             if let w = writingChat { busy[w]?.labels.formUnion(cur.messageLabels) }
+        } else if settled && prev.writing && writingChat == nil {
+            writingNoted = false
         } else if settled && prev.writing, let id = writingChat {
             // Stop went away: finished here, or the user switched to another chat.
             writingChat = nil
@@ -2632,6 +2744,7 @@ final class Bridge {
                 nextBusyRefresh = busy.isEmpty ? .distantFuture : now.addingTimeInterval(10)
             }
             if pendingOpen != nil, now.timeIntervalSince(pendingOpen!.at) > 0.7 { finishPendingOpen() }
+            if pendingMode != nil { applyPendingMode() }
             if let p = pendingStop, now.timeIntervalSince(p.at) > 2.0, pendingOpen == nil {
                 pendingStop = nil
                 let v = claude.read()
