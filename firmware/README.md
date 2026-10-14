@@ -13,8 +13,8 @@ every push.
 
 ## What it changes
 
-- **Version** `0.0.88-pb.2` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 2`
-  (pb.1 sent 1).
+- **Version** `0.0.88-pb.3` (version.txt, which becomes `esp_app_desc.version`). `hello` carries `"pb": 2`
+  (pb.1 sent 1; pb.3 changes behaviour only, not the protocol).
 - **Side pages** (once a Puck Bridge host has sent `ambient`, `pb.menu` or `pb.sound` on this connection; off again on
   disconnect): `Settings ← Clock → pane 1 → pane 2 → …`. On the face, swiping right from the first pane goes to the
   clock, and nothing wraps. On the clock, swipe left → the pane on the face (or the first), swipe right → Settings,
@@ -30,12 +30,16 @@ every push.
   ±2°) each minute against AMOLED burn-in. The clock decides on release: a tap goes back to the face, a sideways swipe
   pages.
 - **Small (BOOT) button.** A **tap** cancels live voice, then: picker → its list, anywhere else → the clock. A
-  **hold** (800 ms or more) opens the "stop this turn?" screen when the pane on the face is busy, and otherwise turns
+  **hold** (800 ms or more) opens the "stop this turn?" screen when the pane on the face is busy (on the clock: that
+  pane, or the only pane working), and otherwise turns
   the screen on or off as before. A press still wakes a dark screen. Factory reset (BOOT held at power-on) is unchanged.
+- **A fresh connection starts on the clock** (pb.3): the first `ambient` chooses the first pane when none is chosen
+  (so the face never says "Choose a pane") and shows the clock, unless the face is in use.
 - **Idle becomes the clock.** After `idleMin` minutes (default 5) with nothing going on, the agent face becomes the
-  clock. "Nothing going on" means no touch, no busy pane, no voice, connected, and the face showing (not a list,
-  question, draft, form, message, stop or update screen). A turn starting, a finished turn that rings, or a host
-  `focus` leave the clock.
+  clock. "Nothing going on" means no touch, no voice, connected, and the face showing (not a list, question, draft,
+  form, message, stop or update screen); a pane that is working doesn't hold it off (pb.3), since the ring shows it.
+  A turn that starts leaves the clock up and turns its ring segment orange (pb.3; pb.2 went back to the face). A
+  finished turn that rings, or a host `focus`, leaves the clock.
 - **Screen sleep.** The firmware normally turns the panel off after 5 minutes without a touch. While the clock is up
   it stays on. If the idle timer had already turned the panel off when the clock takes over, the panel comes back on.
   The PWR tap and the BOOT hold still turn it off.
@@ -114,7 +118,7 @@ Puck → host:
 ## Restoring official firmware
 
 - Let OpenHarness connect (Puck Bridge → Settings → Advanced → Lend the Puck to OpenHarness…). Its daemon updates the
-  puck to the official firmware, because `0.0.88-pb.2` is not the published version.
+  puck to the official firmware, because `0.0.88-pb.3` is not the published version.
 - Or flash the official image with the repo's `flash-circle.sh --version <x.y.z>`, or write back a full-flash backup
   with `esptool write_flash 0 backup.bin`.
 - If the firmware will not boot, hold BOOT while plugging in to enter ROM download mode, then flash.
