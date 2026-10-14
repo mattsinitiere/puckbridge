@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 The release tag (`vX.Y.Z`) is the version; move "Unreleased" items under a new heading when tagging.
 
 ## [Unreleased]
+### Added
+- **Characters in iCloud Drive:** your imported characters are kept in iCloud Drive too (Puck Bridge → Characters), so importing them once puts them on every Mac signed in to your iCloud. Removing one removes it everywhere. Settings → Character → "Keep them in iCloud Drive" turns it off. They stay private: never in this app's repo or releases.
 ### Changed
 - **Puck Bridge firmware 0.0.88-pb.3:** when Claude starts working while the clock is up, the clock stays and that chat's segment in the ring turns orange (it used to jump to the chat). The finished reply still beeps and shows its card. The idle clock now also comes up while Claude works, and holding the small button on the clock stops the chat that's working.
 - **No more "Choose a pane" at startup:** the puck now starts on the clock with your first chat chosen (firmware pb.3), and Puck Bridge tells the puck which chat to show after it connects or switches tabs (the one you last opened, else the one open in Claude, else the first). Official firmware gets a real chat on its face as well.

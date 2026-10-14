@@ -55,6 +55,8 @@ enum Pref {
     /// Finish sound on Puck Bridge firmware (one of SOUND_STYLES) and its volume.
     static var soundStyle: String { get { d.string(forKey: "soundStyle") ?? "chime" } set { d.set(newValue, forKey: "soundStyle") } }
     static var soundVolume: Int { get { d.object(forKey: "soundVolume") as? Int ?? 75 } set { d.set(newValue, forKey: "soundVolume") } }
+    /// Keep the character library in iCloud Drive too, so every Mac signed in to it has the same characters.
+    static var syncCharacters: Bool { get { bool("syncCharacters", true) } set { d.set(newValue, forKey: "syncCharacters") } }
 }
 
 let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PuckBridge.log")
@@ -530,6 +532,7 @@ final class CharacterLibrary {
     func find(_ id: String) -> LibraryCharacter? { all.first { $0.id == id } }
 
     func reload() {
+        sync()
         var out: [LibraryCharacter] = []
         for dir in (try? FileManager.default.contentsOfDirectory(at: libraryDir, includingPropertiesForKeys: nil)) ?? [] {
             guard let d = try? Data(contentsOf: dir.appendingPathComponent("character.json")),
@@ -609,8 +612,85 @@ final class CharacterLibrary {
     }
 
     func remove(_ id: String) {
-        if let c = find(id) { try? FileManager.default.removeItem(at: c.dir) }
+        if let c = find(id) {
+            try? FileManager.default.removeItem(at: c.dir)
+            if let cloud = cloudDir { try? FileManager.default.removeItem(at: cloud.appendingPathComponent(c.dir.lastPathComponent)) }
+            var seen = Set(UserDefaults.standard.stringArray(forKey: "cloudCharacters") ?? [])
+            seen.remove(c.dir.lastPathComponent)
+            UserDefaults.standard.set(Array(seen), forKey: "cloudCharacters")
+        }
         reload()
+    }
+
+    // ---------- iCloud Drive: the same library on every Mac ----------
+    // Characters stay private (your iCloud, never this app's repo or releases). Each folder is copied whole: a folder new
+    // on either side goes to the other, and a folder this Mac once saw in iCloud that is gone from there now was removed
+    // on another Mac, so it goes here too.
+    static let cloudRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+    var cloudDir: URL? {
+        guard Pref.syncCharacters, FileManager.default.fileExists(atPath: CharacterLibrary.cloudRoot.path) else { return nil }
+        return CharacterLibrary.cloudRoot.appendingPathComponent("Puck Bridge/Characters")
+    }
+
+    /// Folder names holding a readable character.json and its sheet; `pending` = there but not downloaded yet.
+    private func folders(_ root: URL, pending: inout Set<String>) -> Set<String> {
+        let fm = FileManager.default
+        var ready = Set<String>()
+        for entry in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [])) ?? [] {
+            var name = entry.lastPathComponent
+            if name.hasPrefix("."), name.hasSuffix(".icloud") {   // a whole folder not downloaded yet: ".tiko.icloud"
+                name = String(name.dropFirst().dropLast(".icloud".count))
+                try? fm.startDownloadingUbiquitousItem(at: root.appendingPathComponent(name))
+                pending.insert(name)
+                continue
+            }
+            guard !name.hasPrefix("."), (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+            let meta = entry.appendingPathComponent("character.json")
+            if let d = try? Data(contentsOf: meta), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let sheet = j["sheet"] as? String, fm.fileExists(atPath: entry.appendingPathComponent(sheet).path) {
+                ready.insert(name)
+            } else {
+                // Files inside not downloaded yet (".spritesheet.webp.icloud"): ask for them, take it next time.
+                for f in (try? fm.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil)) ?? [] where f.lastPathComponent.hasSuffix(".icloud") {
+                    let real = String(f.lastPathComponent.dropFirst().dropLast(".icloud".count))
+                    try? fm.startDownloadingUbiquitousItem(at: entry.appendingPathComponent(real))
+                }
+                pending.insert(name)
+            }
+        }
+        return ready
+    }
+
+    func sync() {
+        guard let cloud = cloudDir else { return }
+        let fm = FileManager.default
+        do { try fm.createDirectory(at: cloud, withIntermediateDirectories: true) } catch {
+            say("Characters: iCloud Drive isn't reachable (\(error.localizedDescription)); keeping them on this Mac only")
+            return
+        }
+        try? fm.createDirectory(at: libraryDir, withIntermediateDirectories: true)
+        var pending = Set<String>(), ignore = Set<String>()
+        let remote = folders(cloud, pending: &pending), local = folders(libraryDir, pending: &ignore)
+        var seen = Set(UserDefaults.standard.stringArray(forKey: "cloudCharacters") ?? [])
+        // An empty iCloud folder (iCloud Drive just turned on, or off and back) never deletes anything here.
+        let cloudEmpty = remote.isEmpty && pending.isEmpty
+        var pulled = 0, dropped = 0
+        var pushed: Set<String> = []
+        for n in remote.subtracting(local) {
+            if (try? fm.copyItem(at: cloud.appendingPathComponent(n), to: libraryDir.appendingPathComponent(n))) != nil { pulled += 1 }
+        }
+        for n in local.subtracting(remote) where !pending.contains(n) {
+            if seen.contains(n) && !cloudEmpty {
+                try? fm.removeItem(at: libraryDir.appendingPathComponent(n)); dropped += 1   // removed on another Mac
+            } else if (try? fm.copyItem(at: libraryDir.appendingPathComponent(n), to: cloud.appendingPathComponent(n))) != nil {
+                pushed.insert(n)
+            }
+        }
+        seen = remote.union(pending).union(pushed)
+        UserDefaults.standard.set(Array(seen), forKey: "cloudCharacters")
+        if pulled + pushed.count + dropped > 0 {
+            say("Characters: iCloud Drive sync (\(pulled) from other Macs, \(pushed.count) shared, \(dropped) removed elsewhere)")
+        }
     }
 
     /// The old single custom character (≤ v0.6) becomes a library entry.
@@ -2778,6 +2858,7 @@ final class AppModel: ObservableObject {
         self.bridge = bridge
         self.updater = updater
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPermissions() }
+        Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in self?.refreshLibrary() }
         DispatchQueue.global(qos: .userInitiated).async {
             CharacterLibrary.shared.migrate()
             CharacterLibrary.shared.reload()
@@ -2851,6 +2932,24 @@ final class AppModel: ObservableObject {
                 self.customNote = note
                 say("Characters: added \(r.added.count), skipped \(r.errors.count)")
                 if r.added.count == 1 { self.choose(r.added[0].id) }
+                self.bridge.perform { $0.sendMenu() }
+            }
+        }
+    }
+
+    func setCharacterSync(_ on: Bool) {
+        Pref.syncCharacters = on
+        objectWillChange.send()
+        refreshLibrary()
+    }
+    /// Pick up characters added or removed on another Mac (iCloud Drive), off the main thread.
+    func refreshLibrary() {
+        DispatchQueue.global(qos: .utility).async {
+            let before = CharacterLibrary.shared.all.map { $0.id }
+            CharacterLibrary.shared.reload()
+            guard CharacterLibrary.shared.all.map({ $0.id }) != before else { return }
+            DispatchQueue.main.async {
+                self.reloadLibrary()
                 self.bridge.perform { $0.sendMenu() }
             }
         }
@@ -3307,7 +3406,8 @@ struct CharacterPane: View {
                     if model.customBusy { ProgressView().controlSize(.small) }
                 }
                 if !model.customNote.isEmpty { Text(model.customNote).font(.caption) }
-                Text("Choose petdex characters: sprite sheets (8 × 9 frames, 1536 × 1872 or 768 × 936, PNG or WebP), folders with a pet.json, or .zip files of them. They stay on this Mac; the puck gets the one you pick over the cable, again after each restart.")
+                Toggle("Keep them in iCloud Drive, the same on all your Macs", isOn: Binding(get: { Pref.syncCharacters }, set: { model.setCharacterSync($0) }))
+                Text("Choose petdex characters: sprite sheets (8 × 9 frames, 1536 × 1872 or 768 × 936, PNG or WebP), folders with a pet.json, or .zip files of them. They stay private: on this Mac and, with the switch on, in your iCloud Drive (Puck Bridge → Characters), so importing once is enough for every Mac. The puck gets the one you pick over the cable, again after each restart.")
                     .font(.caption).foregroundStyle(.secondary)
                 Link("Find characters on petdex.dev", destination: URL(string: "https://petdex.dev")!)
             }
